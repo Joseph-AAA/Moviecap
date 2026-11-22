@@ -1,17 +1,12 @@
+import { MovieCapColors as C } from "@/constants/theme";
 import { NativeTabs } from "expo-router/native-tabs";
-import { useColorScheme } from "react-native";
-
-import { Colors } from "@/constants/theme";
 
 export default function AppTabs() {
-  const scheme = useColorScheme();
-  const colors = Colors[scheme === "dark" ? "dark" : "light"];
-
   return (
     <NativeTabs
-      backgroundColor={colors.background}
-      indicatorColor={colors.backgroundElement}
-      labelStyle={{ selected: { color: colors.text } }}
+      backgroundColor={C.background}
+      indicatorColor={C.elevated}
+      labelStyle={{ selected: { color: C.text } }}
     >
       <NativeTabs.Trigger name="index">
         <NativeTabs.Trigger.Label>Home</NativeTabs.Trigger.Label>
@@ -21,7 +16,7 @@ export default function AppTabs() {
         />
       </NativeTabs.Trigger>
 
-      <NativeTabs.Trigger name="explore">
+      <NativeTabs.Trigger name="projects">
         <NativeTabs.Trigger.Label>Projects</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
           src={require("@/assets/images/tabIcons/explore.png")}
@@ -31,3 +26,26 @@ export default function AppTabs() {
     </NativeTabs>
   );
 }
+
+// import { MovieCapColors as C } from "@/constants/theme";
+// import { Tabs } from "expo-router";
+
+// export default function AppTabs() {
+//   return (
+//     <Tabs
+//       screenOptions={{
+//         headerShown: false,
+//         tabBarStyle: {
+//           backgroundColor: C.background,
+//           borderTopColor: C.border,
+//         },
+//         tabBarActiveTintColor: C.text,
+//         tabBarInactiveTintColor: C.secondaryText,
+//       }}
+//     >
+//       <Tabs.Screen name="index" options={{ title: "Home" }} />
+
+//       <Tabs.Screen name="projects" options={{ title: "Projects" }} />
+//     </Tabs>
+//   );
+// }
