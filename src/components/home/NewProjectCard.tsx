@@ -1,10 +1,16 @@
+import { useRouter } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 
 import { homeStyles as styles } from "@/styles/home.styles";
 
 export default function NewProjectCard() {
+  const router = useRouter();
+
   return (
-    <Pressable style={styles.newProject}>
+    <Pressable
+      style={styles.newProject}
+      onPress={() => router.push("/import-video")}
+    >
       <View style={styles.newProjectIcon}>
         <Text style={styles.plus}>＋</Text>
       </View>

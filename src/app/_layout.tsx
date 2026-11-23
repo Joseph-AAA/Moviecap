@@ -1,11 +1,19 @@
 import { AnimatedSplashOverlay } from "@/components/animated-icon";
+import { initializeDatabase } from "@/services/database";
 import { DarkTheme, Stack, ThemeProvider } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
+import { useEffect } from "react";
 import { View } from "react-native";
 
 SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
+  useEffect(() => {
+    initializeDatabase().catch((error) => {
+      console.error("Database initialization failed:", error);
+    });
+  }, []);
+
   return (
     <ThemeProvider
       value={{

@@ -4,11 +4,13 @@ import { useState } from "react";
 import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 
 import { MovieCapColors as C } from "@/constants/theme";
+import { createVideoProject } from "@/services/project-storage";
 
 export default function ImportVideoScreen() {
   const router = useRouter();
 
   const [video, setVideo] = useState<ImagePicker.ImagePickerAsset | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   const pickVideo = async () => {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -32,6 +34,32 @@ export default function ImportVideoScreen() {
     }
   };
 
+  const handleSaveProject = async () => {
+    if (!video || isSaving) return;
+
+    try {
+      setIsSaving(true);
+
+      const project = await createVideoProject({
+        uri: video.uri,
+        fileName: video.fileName ?? null,
+        duration: video.duration ?? null,
+        fileSize: video.fileSize ?? null,
+        width: video.width,
+        height: video.height,
+      });
+
+      Alert.alert(
+        "Project Saved",
+        `${project.name} has been saved successfully.`,
+      );
+    } catch (error) {
+      console.error("Failed to save project:", error);
+      Alert.alert("Error", "Could not save your project. Please try again.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
   const formatDuration = (milliseconds?: number | null) => {
     if (milliseconds == null) return "Unknown duration";
 
@@ -61,9 +89,7 @@ export default function ImportVideoScreen() {
           borderRadius: 12,
         }}
       >
-        <Text style={{ color: "#22C55E", fontSize: 18 }}>
-          VIDEO PICKER TEST
-        </Text>
+        <Text style={{ color: C.primaryLight, fontSize: 16 }}>← Back</Text>
       </Pressable>
 
       <Text
@@ -185,6 +211,23 @@ export default function ImportVideoScreen() {
           <Pressable onPress={pickVideo} style={{ marginTop: 18 }}>
             <Text style={{ color: C.primaryLight, fontWeight: "600" }}>
               Choose another video
+            </Text>
+          </Pressable>
+
+          <Pressable
+            onPress={handleSaveProject}
+            disabled={isSaving}
+            style={{
+              backgroundColor: C.primary,
+              paddingVertical: 15,
+              borderRadius: 12,
+              alignItems: "center",
+              marginTop: 22,
+              opacity: isSaving ? 0.6 : 1,
+            }}
+          >
+            <Text style={{ color: C.text, fontWeight: "700", fontSize: 15 }}>
+              {isSaving ? "Saving Project..." : "Save Project"}
             </Text>
           </Pressable>
         </View>
