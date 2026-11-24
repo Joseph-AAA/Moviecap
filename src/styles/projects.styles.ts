@@ -151,4 +151,102 @@ export const projectsStyles = StyleSheet.create({
     fontSize: 12,
     marginTop: 8,
   },
+  projectCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: C.card,
+    borderRadius: 16,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    gap: 14,
+  },
+  projectInfo: {
+    flex: 1,
+    gap: 6,
+  },
+  projectName: {
+    color: C.text,
+    fontWeight: "700",
+    fontSize: 15,
+  },
+  projectMetadata: {
+    color: C.secondaryText,
+    fontSize: 12,
+  },
+  projectSavedLabel: {
+    color: C.primaryLight,
+    fontSize: 12,
+  },
+  moreButton: {
+    width: 36,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  moreButtonText: {
+    color: C.secondaryText,
+    fontSize: 23,
+    fontWeight: "700",
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.65)",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  modalCard: {
+    backgroundColor: C.card,
+    borderRadius: 18,
+    padding: 22,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  modalTitle: {
+    color: C.text,
+    fontSize: 19,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  modalDescription: {
+    color: C.secondaryText,
+    fontSize: 13,
+    marginBottom: 18,
+  },
+  modalInput: {
+    backgroundColor: C.background,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: C.text,
+    fontSize: 15,
+    marginBottom: 20,
+  },
+  modalActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 12,
+  },
+  modalButton: {
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  cancelButton: {
+    backgroundColor: C.elevated,
+  },
+  saveButton: {
+    backgroundColor: C.primary,
+  },
+  cancelButtonText: {
+    color: C.text,
+    fontWeight: "600",
+  },
+  saveButtonText: {
+    color: C.text,
+    fontWeight: "700",
+  },
 });
