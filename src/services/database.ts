@@ -76,3 +76,19 @@ export async function deleteProject(id: string): Promise<void> {
 
   await db.runAsync("DELETE FROM projects WHERE id = ?", id);
 }
+
+export async function updateProjectName(
+  id: string,
+  name: string,
+): Promise<void> {
+  const db = await getDatabase();
+
+  await db.runAsync(
+    `UPDATE projects
+     SET name = ?, updatedAt = ?
+     WHERE id = ?`,
+    name.trim(),
+    new Date().toISOString(),
+    id,
+  );
+}

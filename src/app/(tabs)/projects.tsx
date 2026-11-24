@@ -2,7 +2,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
-  Image,
+  Alert,
   Pressable,
   ScrollView,
   Text,
@@ -10,8 +10,11 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import ProjectCard from "@/components/projects/ProjectCard";
+import RenameProjectModal from "@/components/projects/RenameProjectModal";
 import { MovieCapColors as C } from "@/constants/theme";
-import { getProjects } from "@/services/database";
+import { getProjects, updateProjectName } from "@/services/database";
+import { removeVideoProject } from "@/services/project-storage";
 import { projectsStyles as styles } from "@/styles/projects.styles";
 import type { VideoProject } from "@/types/project";
 
@@ -21,11 +24,28 @@ export default function ProjectsScreen() {
   const [projects, setProjects] = useState<VideoProject[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
+  const [selectedProject, setSelectedProject] = useState<VideoProject | null>(
+    null,
+  );
+
+  const [isRenameVisible, setIsRenameVisible] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(
+    null,
+  );
+
+  // Load projects from SQLite.
+  const loadProjects = useCallback(async () => {
+    const savedProjects = await getProjects();
+    setProjects(savedProjects);
+  }, []);
+
+  // Refresh the list whenever this screen becomes active.
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
 
-      const loadProjects = async () => {
+      const load = async () => {
         try {
           const savedProjects = await getProjects();
 
@@ -34,6 +54,10 @@ export default function ProjectsScreen() {
           }
         } catch (error) {
           console.error("Failed to load projects:", error);
+
+          if (isActive) {
+            Alert.alert("Error", "Could not load your projects.");
+          }
         } finally {
           if (isActive) {
             setIsLoading(false);
@@ -42,7 +66,7 @@ export default function ProjectsScreen() {
       };
 
       setIsLoading(true);
-      loadProjects();
+      void load();
 
       return () => {
         isActive = false;
@@ -50,16 +74,87 @@ export default function ProjectsScreen() {
     }, []),
   );
 
-  const formatDuration = (milliseconds: number) => {
-    const totalSeconds = Math.floor(milliseconds / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-
-    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  // Open rename modal.
+  const handleOpenRename = (project: VideoProject) => {
+    setSelectedProject(project);
+    setIsRenameVisible(true);
   };
 
-  const formatFileSize = (bytes: number) => {
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  // Close rename modal.
+  const handleCloseRename = () => {
+    if (isSaving) return;
+
+    setIsRenameVisible(false);
+    setSelectedProject(null);
+  };
+
+  // Save the updated project name.
+  const handleRename = async (newName: string) => {
+    if (!selectedProject || isSaving) return;
+
+    try {
+      setIsSaving(true);
+
+      await updateProjectName(selectedProject.id, newName);
+
+      await loadProjects();
+
+      setIsRenameVisible(false);
+      setSelectedProject(null);
+
+      Alert.alert("Success", "Project renamed successfully.");
+    } catch (error) {
+      console.error("Failed to rename project:", error);
+
+      Alert.alert("Error", "Could not rename this project.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Ask for confirmation before deleting.
+  const handleDelete = (project: VideoProject) => {
+    Alert.alert(
+      "Delete Project",
+      `Are you sure you want to delete "${project.name}"? This will permanently remove its video and thumbnail from your device.`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            void confirmDelete(project);
+          },
+        },
+      ],
+    );
+  };
+
+  // Delete the project and its local files.
+  const confirmDelete = async (project: VideoProject) => {
+    if (deletingProjectId) return;
+
+    try {
+      setDeletingProjectId(project.id);
+
+      await removeVideoProject(project.id);
+
+      await loadProjects();
+
+      Alert.alert("Deleted", "Project deleted successfully.");
+    } catch (error) {
+      console.error("Failed to delete project:", error);
+
+      Alert.alert(
+        "Deletion incomplete",
+        "Could not completely delete this project. Please check your device storage.",
+      );
+    } finally {
+      setDeletingProjectId(null);
+    }
   };
 
   return (
@@ -93,6 +188,7 @@ export default function ProjectsScreen() {
 
           <View style={styles.newProjectInfo}>
             <Text style={styles.newProjectTitle}>Create New Project</Text>
+
             <Text style={styles.newProjectDescription}>
               Start editing a new video
             </Text>
@@ -131,70 +227,15 @@ export default function ProjectsScreen() {
           /* Saved Projects */
           <View style={{ gap: 14 }}>
             {projects.map((project) => (
-              <Pressable
+              <ProjectCard
                 key={project.id}
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  backgroundColor: C.card,
-                  borderRadius: 16,
-                  padding: 12,
-                  borderWidth: 1,
-                  borderColor: C.border,
-                  gap: 14,
-                }}
+                project={project}
                 onPress={() => {
                   console.log("Selected project:", project.id);
                 }}
-              >
-                {project.thumbnailUri ? (
-                  <Image
-                    source={{ uri: project.thumbnailUri }}
-                    style={{
-                      width: 100,
-                      height: 76,
-                      borderRadius: 10,
-                      backgroundColor: C.elevated,
-                    }}
-                    resizeMode="cover"
-                  />
-                ) : (
-                  <View
-                    style={{
-                      width: 100,
-                      height: 76,
-                      borderRadius: 10,
-                      backgroundColor: C.elevated,
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <Text style={{ fontSize: 28 }}>🎬</Text>
-                  </View>
-                )}
-
-                <View style={{ flex: 1, gap: 6 }}>
-                  <Text
-                    style={{
-                      color: C.text,
-                      fontWeight: "700",
-                      fontSize: 15,
-                    }}
-                    numberOfLines={1}
-                  >
-                    {project.name}
-                  </Text>
-
-                  <Text style={{ color: C.secondaryText, fontSize: 12 }}>
-                    {formatDuration(project.duration)} ·{" "}
-                    {formatFileSize(project.fileSize)}
-                  </Text>
-
-                  <Text style={{ color: C.primaryLight, fontSize: 12 }}>
-                    Saved locally
-                  </Text>
-                </View>
-              </Pressable>
+                onRename={handleOpenRename}
+                onDelete={handleDelete}
+              />
             ))}
           </View>
         )}
@@ -202,15 +243,26 @@ export default function ProjectsScreen() {
         {/* Storage Information */}
         <View style={styles.storageCard}>
           <Text style={styles.storageTitle}>LOCAL STORAGE</Text>
+
           <Text style={styles.storageDescription}>
             Your projects are stored on your device.
           </Text>
+
           <Text style={styles.storageStatus}>
             {projects.length} {projects.length === 1 ? "project" : "projects"}{" "}
             created
           </Text>
         </View>
       </ScrollView>
+
+      {/* Rename Project Modal */}
+      <RenameProjectModal
+        visible={isRenameVisible}
+        project={selectedProject}
+        isSaving={isSaving}
+        onClose={handleCloseRename}
+        onSave={handleRename}
+      />
     </SafeAreaView>
   );
 }
