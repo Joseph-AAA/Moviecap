@@ -39,7 +39,8 @@
           "photosPermission": "Allow MovieCap to access your videos so you can import and edit them."
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true,
