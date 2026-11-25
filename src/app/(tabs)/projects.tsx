@@ -231,7 +231,7 @@ export default function ProjectsScreen() {
                 key={project.id}
                 project={project}
                 onPress={() => {
-                  console.log("Selected project:", project.id);
+                  router.push(`../editor/${project.id}`);
                 }}
                 onRename={handleOpenRename}
                 onDelete={handleDelete}
