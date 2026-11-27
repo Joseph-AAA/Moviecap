@@ -115,8 +115,8 @@ export default function DefaultEditPanel({
       </View>
 
       <Text style={{ color: C.secondaryText, fontSize: 12 }}>
-        Random 15–20 s cuts · subtle 0.4 s dissolves · 2–3 freeze frames with a
-        slow 5 s zoom
+        Random 15–20 s cuts · subtle 0.4 s dissolves · 2–3 freeze frames that
+        zoom slowly for 5 s while the audio keeps playing
       </Text>
 
       <View style={{ flexDirection: "row", gap: 10 }}>
@@ -197,15 +197,15 @@ export default function DefaultEditPanel({
 
           <Text style={{ color: C.secondaryText, fontSize: 12 }}>
             {defaultEdit.segments.length} segments ·{" "}
-            {defaultEdit.transitions.length} transitions · final length{" "}
-            {formatClipDuration(timeline.outputDuration)} (original{" "}
-            {formatClipDuration(config.sourceDuration)})
+            {defaultEdit.transitions.length} transitions · length stays{" "}
+            {formatClipDuration(timeline.outputDuration)}
           </Text>
 
           {defaultEdit.freezes.map((freeze) => (
             <Text key={freeze.id} style={{ color: C.primaryLight, fontSize: 12 }}>
-              ❄ Freeze at {formatTimestamp(freeze.sourceTime)} · {freeze.duration}s
-              · zoom to {freeze.zoomTo}×
+              ❄ Freeze {formatTimestamp(freeze.sourceTime)}–
+              {formatTimestamp(freeze.sourceTime + freeze.duration)} · zoom to{" "}
+              {freeze.zoomTo}× · audio continues
             </Text>
           ))}
 

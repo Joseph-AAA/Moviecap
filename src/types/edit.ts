@@ -6,7 +6,8 @@
  * MP4 is rendered from these instructions.
  *
  * All times are in SECONDS on the SOURCE video's timeline unless a field is
- * explicitly named `output...`. Freeze frames extend the output (see
+ * explicitly named `output...`. Freeze frames REPLACE a stretch of video and
+ * the original audio keeps playing, so output time == source time (see
  * buildTimeline in services/timeline/editTimeline.ts).
  */
 
@@ -50,9 +51,10 @@ export type ZoomDirection =
   | "bottom-right";
 
 /**
- * Freeze the frame at `sourceTime` for `duration` seconds, zooming from
- * `zoomFrom` to `zoomTo` (1 = no zoom). The output timeline grows by
- * `duration`; the original audio is silent during the freeze.
+ * Replace the video from `sourceTime` to `sourceTime + duration` with the
+ * frame at `sourceTime`, zooming from `zoomFrom` to `zoomTo` (1 = no zoom).
+ * The original frames in that stretch are dropped; the ORIGINAL AUDIO KEEPS
+ * PLAYING, and the output length does not change.
  */
 export interface FreezeEffect {
   id: string;
@@ -136,6 +138,9 @@ export type TimelineItem =
   | {
       type: "freeze";
       freeze: FreezeEffect;
+      /** The source stretch this freeze replaces (audio plays through it). */
+      sourceStart: number;
+      sourceEnd: number;
       outputStart: number;
       outputEnd: number;
     };

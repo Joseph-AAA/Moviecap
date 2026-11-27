@@ -17,15 +17,27 @@ interface EffectsPreviewOverlayProps {
   transitions: PreviewTransition[];
 }
 
-/** Only react to normal playback, not to seeks or scrubbing. */
+/** Only treat small forward steps as normal playback (not seeks). */
 const MAX_PLAYBACK_STEP = 0.6;
+/** Matches the player's timeUpdateEventInterval set in VideoPreview. */
+const TICK_SECONDS = 0.1;
+
+function easeInOut(p: number): number {
+  const x = Math.min(1, Math.max(0, p));
+  return x * x * (3 - 2 * x); // smoothstep, same curve as the renderer
+}
+
+function zoomAt(freeze: FreezeEffect, time: number): number {
+  const progress = (time - freeze.sourceTime) / freeze.duration;
+  return freeze.zoomFrom + (freeze.zoomTo - freeze.zoomFrom) * easeInOut(progress);
+}
 
 /**
  * Approximate, live preview of timeline effects on top of the editor's
- * player. Nothing here affects the source video or the export:
- * - Freeze: when playback crosses a freeze time, the player pauses and the
- *   real frame at that time is shown with a slow zoom for the freeze
- *   duration, then playback resumes.
+ * player. Nothing here affects the source video or the export.
+ * - Freeze: while the playhead is inside a freeze's stretch, the real frame
+ *   at its start is shown on top, zooming as playback advances. The video
+ *   (and its AUDIO) keeps playing underneath, exactly like the export.
  * - Transition: a brief dip at each cut, approximating the dissolve.
  */
 export default function EffectsPreviewOverlay({
@@ -40,9 +52,7 @@ export default function EffectsPreviewOverlay({
   const [scale] = useState(() => new Animated.Value(1));
   const [dip] = useState(() => new Animated.Value(0));
   const lastTimeRef = useRef(0);
-  const freezeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeFreezeRef = useRef<FreezeEffect | null>(null);
-  const resumingRef = useRef(false);
+  const activeFreezeIdRef = useRef<string | null>(null);
 
   // Pre-capture the real frames for each freeze (sharp, aspect preserved).
   const freezeKey = freezes.map((f) => `${f.id}@${f.sourceTime}`).join("|");
@@ -74,48 +84,6 @@ export default function EffectsPreviewOverlay({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [freezeKey, player]);
 
-  const endFreeze = (resume: boolean) => {
-    if (freezeTimerRef.current) clearTimeout(freezeTimerRef.current);
-    freezeTimerRef.current = null;
-    scale.stopAnimation();
-    activeFreezeRef.current = null;
-    setActiveFreeze(null);
-
-    if (resume) {
-      resumingRef.current = true;
-      player.play();
-    }
-  };
-
-  // Clean up timers if the editor closes mid-freeze.
-  useEffect(
-    () => () => {
-      if (freezeTimerRef.current) clearTimeout(freezeTimerRef.current);
-    },
-    [],
-  );
-
-  const startFreeze = (freeze: FreezeEffect) => {
-    if (!frames[freeze.id]) return; // frame not ready: skip silently
-
-    player.pause();
-    activeFreezeRef.current = freeze;
-    setActiveFreeze(freeze);
-
-    scale.setValue(freeze.zoomFrom);
-    Animated.timing(scale, {
-      toValue: freeze.zoomTo,
-      duration: freeze.duration * 1000,
-      easing: Easing.inOut(Easing.quad), // gradual, cinematic
-      useNativeDriver: true,
-    }).start();
-
-    freezeTimerRef.current = setTimeout(
-      () => endFreeze(true),
-      freeze.duration * 1000,
-    );
-  };
-
   const playDip = (duration: number) => {
     dip.setValue(0);
     Animated.sequence([
@@ -136,30 +104,39 @@ export default function EffectsPreviewOverlay({
     const previous = lastTimeRef.current;
     lastTimeRef.current = currentTime;
 
-    if (activeFreezeRef.current) return;
+    // Which freeze (if any) covers the playhead right now.
+    const freeze =
+      freezes.find(
+        (f) => currentTime >= f.sourceTime && currentTime < f.sourceTime + f.duration,
+      ) ?? null;
 
+    if ((freeze?.id ?? null) !== activeFreezeIdRef.current) {
+      activeFreezeIdRef.current = freeze?.id ?? null;
+      setActiveFreeze(freeze);
+      if (freeze) scale.setValue(zoomAt(freeze, currentTime));
+    }
+
+    if (freeze) {
+      // Glide to where the zoom will be at the next tick: smooth while
+      // playing, and correct immediately when paused or scrubbed.
+      const target = player.playing ? currentTime + TICK_SECONDS : currentTime;
+      Animated.timing(scale, {
+        toValue: zoomAt(freeze, target),
+        duration: player.playing ? TICK_SECONDS * 1000 : 0,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }).start();
+      return;
+    }
+
+    // Transition dip only during normal playback, not when seeking.
     const step = currentTime - previous;
     if (step <= 0 || step > MAX_PLAYBACK_STEP || !player.playing) return;
 
-    const crossed = (t: number) => previous < t && currentTime >= t;
-
-    const freeze = freezes.find((f) => crossed(f.sourceTime));
-    if (freeze) {
-      startFreeze(freeze);
-      return;
-    }
-
-    const transition = transitions.find((t) => crossed(t.sourceTime));
+    const transition = transitions.find(
+      (t) => previous < t.sourceTime && currentTime >= t.sourceTime,
+    );
     if (transition) playDip(transition.duration);
-  });
-
-  // If the user presses play/pause during a freeze, hand control back.
-  useEventListener(player, "playingChange", ({ isPlaying }) => {
-    if (resumingRef.current) {
-      resumingRef.current = false;
-      return;
-    }
-    if (activeFreezeRef.current && isPlaying) endFreeze(false);
   });
 
   const frame = activeFreeze ? frames[activeFreeze.id] : null;
@@ -181,7 +158,7 @@ export default function EffectsPreviewOverlay({
           </Animated.View>
 
           <View style={styles.badge}>
-            <Text style={styles.badgeText}>❄ Freeze preview</Text>
+            <Text style={styles.badgeText}>❄ Freeze preview · audio continues</Text>
           </View>
         </View>
       )}

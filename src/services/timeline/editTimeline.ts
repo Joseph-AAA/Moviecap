@@ -2,15 +2,17 @@
  * Pure editing-timeline logic (no React, no native modules, no runtime
  * imports) so it can be unit-tested with `node --test`.
  *
- * Timing model (documented decision):
- * - Freeze frames EXTEND the output. A 5 s freeze at source time t shows the
- *   frame at t for 5 s, then playback resumes at t. No source video is
- *   discarded. Original audio is silent during the freeze, and anything
- *   timed after t (dialogue, subtitles) shifts later by the freeze duration —
- *   see mapSourceToOutput.
+ * Timing model (decided with the user, 2026-11-27):
+ * - Freeze frames REPLACE video. A 5 s freeze at source time t shows the
+ *   frame at t (with a slow zoom) from t to t+5; the original frames in that
+ *   stretch are dropped. The ORIGINAL AUDIO KEEPS PLAYING underneath, so the
+ *   output is exactly as long as the source and output time == source time.
+ *   Dialogue, subtitles and dubbing never need re-timing.
  * - Transitions do NOT change the output length and do not drop frames: the
  *   renderer holds the outgoing item's last frame for the transition length
  *   while it dissolves into the incoming item.
+ * - Leaving a freeze always dissolves back to live video (the picture would
+ *   otherwise jump from the zoomed still), unless a transition is set there.
  * - Segments are contiguous and in source order; they cover the whole video.
  */
 
@@ -35,8 +37,14 @@ export const MIN_FINAL_SEGMENT = 5;
 export const DEFAULT_TRANSITION_DURATION = 0.4;
 export const DEFAULT_FREEZE_DURATION = 5;
 export const DEFAULT_FREEZE_ZOOM_TO = 1.15;
-/** Default freezes stay at least this far from cuts and from the video ends. */
+/** Default freezes keep at least this far from cuts and from the video ends. */
 export const FREEZE_EDGE_MARGIN = 2;
+/** Minimum gap between two default freezes. */
+export const FREEZE_MIN_GAP = 1;
+/** Shorter freezes (after clamping to the video end) are dropped. */
+export const MIN_FREEZE_DURATION = 0.5;
+/** Dissolve used when a freeze hands back to live video. */
+export const FREEZE_EXIT_TRANSITION_DURATION = 0.4;
 /** Times closer than this are treated as the same point. */
 export const TIME_EPSILON = 0.05;
 
@@ -72,6 +80,10 @@ export function newSeed(): number {
 
 function makeId(prefix: string, index: number, seed: number): string {
   return `${prefix}-${seed.toString(36)}-${index}`;
+}
+
+function sameTime(a: number, b: number): boolean {
+  return Math.abs(a - b) < TIME_EPSILON;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,9 +135,11 @@ export function generateSegments(
 }
 
 /**
- * Pick 2 or 3 freeze moments spread across the video: the video is divided
- * into equal zones and one moment is chosen inside each zone, keeping
- * FREEZE_EDGE_MARGIN away from cuts and from the start/end.
+ * Pick 2 or 3 freeze moments. Each freeze covers [t, t + duration], and that
+ * whole stretch (plus FREEZE_EDGE_MARGIN) must stay clear of cuts and of the
+ * video's start/end. Valid start times are spread into equal zones and one
+ * moment is chosen in the middle of each zone, never overlapping the
+ * previous freeze. Fewer freezes are returned when the video is too short.
  *
  * Note: "suitable" here means well spaced and away from transitions; picking
  * by scene content would need video analysis and is out of scope.
@@ -136,40 +150,46 @@ export function generateFreezes(
   random: () => number,
   seed: number,
 ): FreezeEffect[] {
-  if (duration < FREEZE_EDGE_MARGIN * 2 + 1) return [];
+  const length = DEFAULT_FREEZE_DURATION;
+  const step = 0.1;
+
+  // All valid start times on a 0.1 s grid.
+  const candidates: number[] = [];
+  for (let t = FREEZE_EDGE_MARGIN; t + length <= duration - FREEZE_EDGE_MARGIN; t += step) {
+    const blocked = cutTimes.some(
+      (cut) => cut > t - FREEZE_EDGE_MARGIN && cut < t + length + FREEZE_EDGE_MARGIN,
+    );
+    if (!blocked) candidates.push(roundTime(t));
+  }
 
   const count = random() < 0.5 ? 2 : 3;
-  const usableStart = FREEZE_EDGE_MARGIN;
-  const usableEnd = duration - FREEZE_EDGE_MARGIN;
-  const zoneLength = (usableEnd - usableStart) / count;
   const freezes: FreezeEffect[] = [];
+  let earliest = 0;
 
   for (let zone = 0; zone < count; zone++) {
-    const zoneStart = usableStart + zone * zoneLength;
+    const zoneStart = Math.floor((zone * candidates.length) / count);
+    const zoneEnd = Math.floor(((zone + 1) * candidates.length) / count);
+    const pool = candidates
+      .slice(zoneStart, zoneEnd)
+      .filter((t) => t >= earliest);
 
-    // Try a few random spots in the middle 60% of the zone, preferring ones
-    // that keep clear of cuts; fall back to the zone centre.
-    let chosen = zoneStart + zoneLength / 2;
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const candidate = zoneStart + zoneLength * (0.2 + random() * 0.6);
-      const nearCut = cutTimes.some(
-        (cut) => Math.abs(cut - candidate) < FREEZE_EDGE_MARGIN,
-      );
-      if (!nearCut) {
-        chosen = candidate;
-        break;
-      }
-    }
+    if (pool.length === 0) continue;
+
+    // Middle 60% of the zone keeps freezes well spread.
+    const lo = Math.floor(pool.length * 0.2);
+    const hi = Math.max(lo + 1, Math.ceil(pool.length * 0.8));
+    const chosen = pool[lo + Math.floor(random() * (hi - lo))];
 
     freezes.push({
       id: makeId("frz", zone, seed),
       origin: "default",
-      sourceTime: roundTime(chosen),
-      duration: DEFAULT_FREEZE_DURATION,
+      sourceTime: chosen,
+      duration: length,
       zoomFrom: 1,
       zoomTo: DEFAULT_FREEZE_ZOOM_TO,
       zoomDirection: "center",
     });
+    earliest = chosen + length + FREEZE_MIN_GAP;
   }
 
   return freezes;
@@ -268,17 +288,46 @@ export function unapplyDefaultEdit(
 // Resolving the timeline
 // ---------------------------------------------------------------------------
 
-function sameTime(a: number, b: number): boolean {
-  return Math.abs(a - b) < TIME_EPSILON;
+/**
+ * Freezes that take effect, in source order, clamped to the video end.
+ * Freezes never overlap: if two would, the EARLIER one wins and the later
+ * one is skipped (it stays stored, so editing the first can bring it back).
+ */
+export function resolveFreezes(config: EditConfig): FreezeEffect[] {
+  const all = [...(config.defaultEdit?.freezes ?? []), ...config.custom.freezes]
+    .filter((f) => f.sourceTime >= 0 && f.sourceTime < config.sourceDuration)
+    .map((f) => ({
+      ...f,
+      duration: roundTime(Math.min(f.duration, config.sourceDuration - f.sourceTime)),
+    }))
+    .filter((f) => f.duration >= MIN_FREEZE_DURATION)
+    .sort((a, b) => a.sourceTime - b.sourceTime);
+
+  const resolved: FreezeEffect[] = [];
+  for (const freeze of all) {
+    const previous = resolved.at(-1);
+    if (previous && freeze.sourceTime < previous.sourceTime + previous.duration - TIME_EPSILON) {
+      continue;
+    }
+    resolved.push(freeze);
+  }
+  return resolved;
+}
+
+function insideFreeze(time: number, freezes: FreezeEffect[]): boolean {
+  return freezes.some(
+    (f) => time > f.sourceTime + TIME_EPSILON && time < f.sourceTime + f.duration - TIME_EPSILON,
+  );
 }
 
 /**
  * Transitions that take effect, one per cut point.
- * Conflict rule: if a custom and a default transition share a cut point,
- * the CUSTOM one wins. The default one stays stored, so removing the custom
- * transition brings the default back.
+ * - A custom and a default transition at the same cut: the CUSTOM one wins.
+ *   The default stays stored, so removing the custom one brings it back.
+ * - Transitions inside a freeze are skipped (the picture is a still there).
  */
 export function resolveTransitions(config: EditConfig): TransitionEffect[] {
+  const freezes = resolveFreezes(config);
   const resolved = [...config.custom.transitions];
 
   for (const def of config.defaultEdit?.transitions ?? []) {
@@ -288,32 +337,25 @@ export function resolveTransitions(config: EditConfig): TransitionEffect[] {
   }
 
   return resolved
-    .filter((t) => t.at > TIME_EPSILON && t.at < config.sourceDuration - TIME_EPSILON)
-    .sort((a, b) => a.at - b.at);
-}
-
-/** All freezes (default + custom), in source order, inside the video. */
-export function resolveFreezes(config: EditConfig): FreezeEffect[] {
-  return [...(config.defaultEdit?.freezes ?? []), ...config.custom.freezes]
     .filter(
-      (f) =>
-        f.duration > 0 &&
-        f.sourceTime >= 0 &&
-        f.sourceTime <= config.sourceDuration,
+      (t) =>
+        t.at > TIME_EPSILON &&
+        t.at < config.sourceDuration - TIME_EPSILON &&
+        !insideFreeze(t.at, freezes),
     )
-    .sort((a, b) => a.sourceTime - b.sourceTime);
+    .sort((a, b) => a.at - b.at);
 }
 
 /**
  * Turn the stored config into the exact sequence the renderer and the
  * preview follow: clips and freezes in output order, the cuts between them,
- * and the final output duration.
+ * and the final output duration (always equal to the source duration).
  *
  * Cut rules:
- * - Cuts come from default segment boundaries and custom transition points.
- * - Entering and leaving a freeze is a seamless cut (same frame) with no
- *   transition, unless a transition sits at that exact time — then it is
- *   played AFTER the freeze, when motion resumes.
+ * - Cuts come from default segment boundaries, custom transition points and
+ *   freeze start/end points. Cuts inside a freeze disappear.
+ * - Entering a freeze is seamless (same frame) unless a transition is set.
+ * - Leaving a freeze dissolves back to live video unless a transition is set.
  * - A transition never lasts longer than half of the shorter item around it.
  */
 export function buildTimeline(config: EditConfig): Timeline {
@@ -321,70 +363,73 @@ export function buildTimeline(config: EditConfig): Timeline {
   const transitions = resolveTransitions(config);
   const freezes = resolveFreezes(config);
 
-  // Every source time where the clip must be split.
   const splitTimes = new Set<number>();
   for (const segment of config.defaultEdit?.segments ?? []) {
-    if (segment.start > TIME_EPSILON) splitTimes.add(segment.start);
+    splitTimes.add(segment.start);
   }
   for (const t of transitions) splitTimes.add(t.at);
   for (const f of freezes) {
-    if (f.sourceTime > TIME_EPSILON && f.sourceTime < duration - TIME_EPSILON) {
-      splitTimes.add(f.sourceTime);
-    }
+    splitTimes.add(f.sourceTime);
+    splitTimes.add(f.sourceTime + f.duration);
   }
 
-  // Merge split points that are effectively the same time.
   const points = [...splitTimes]
+    .filter((t) => t > TIME_EPSILON && t < duration - TIME_EPSILON && !insideFreeze(t, freezes))
     .sort((a, b) => a - b)
     .filter((t, i, all) => i === 0 || !sameTime(t, all[i - 1]));
 
+  const boundaries = [0, ...points, duration];
   const items: TimelineItem[] = [];
   const cuts: TimelineCut[] = [];
-  let output = 0;
-
-  const pushFreezesAt = (time: number) => {
-    for (const freeze of freezes.filter((f) => sameTime(f.sourceTime, time))) {
-      if (items.length > 0) {
-        cuts.push({ sourceTime: time, afterItemIndex: items.length - 1, transition: null });
-      }
-      items.push({
-        type: "freeze",
-        freeze,
-        outputStart: roundTime(output),
-        outputEnd: roundTime(output + freeze.duration),
-      });
-      output += freeze.duration;
-    }
-  };
-
-  const boundaries = [0, ...points, duration];
 
   for (let i = 0; i < boundaries.length - 1; i++) {
     const start = boundaries[i];
     const end = boundaries[i + 1];
-
-    // Freezes sitting exactly at this boundary come before the next clip.
-    pushFreezesAt(start);
-
     if (end - start <= TIME_EPSILON) continue;
 
-    if (items.length > 0) {
-      const transition = transitions.find((t) => sameTime(t.at, start)) ?? null;
-      cuts.push({ sourceTime: start, afterItemIndex: items.length - 1, transition });
+    const freeze = freezes.find((f) => sameTime(f.sourceTime, start));
+    const previous = items.at(-1);
+
+    if (previous) {
+      const explicit = transitions.find((t) => sameTime(t.at, start)) ?? null;
+      const exitDissolve: TransitionEffect | null =
+        previous.type === "freeze" && !explicit
+          ? {
+              id: `${previous.freeze.id}-exit`,
+              origin: previous.freeze.origin,
+              at: start,
+              kind: "dissolve",
+              duration: FREEZE_EXIT_TRANSITION_DURATION,
+            }
+          : null;
+
+      cuts.push({
+        sourceTime: start,
+        afterItemIndex: items.length - 1,
+        transition: explicit ?? exitDissolve,
+      });
     }
 
-    items.push({
-      type: "clip",
-      sourceStart: roundTime(start),
-      sourceEnd: roundTime(end),
-      outputStart: roundTime(output),
-      outputEnd: roundTime(output + (end - start)),
-    });
-    output += end - start;
+    if (freeze) {
+      const freezeEnd = Math.min(duration, freeze.sourceTime + freeze.duration);
+      items.push({
+        type: "freeze",
+        freeze,
+        sourceStart: roundTime(freeze.sourceTime),
+        sourceEnd: roundTime(freezeEnd),
+        outputStart: roundTime(freeze.sourceTime),
+        outputEnd: roundTime(freezeEnd),
+      });
+    } else {
+      items.push({
+        type: "clip",
+        sourceStart: roundTime(start),
+        sourceEnd: roundTime(end),
+        outputStart: roundTime(start),
+        outputEnd: roundTime(end),
+      });
+    }
   }
-
-  // A freeze on the very last frame.
-  pushFreezesAt(duration);
 
   // Clamp transition lengths so they always fit the items around them.
   const clampedCuts = cuts.map((cut) => {
@@ -403,22 +448,16 @@ export function buildTimeline(config: EditConfig): Timeline {
       : cut;
   });
 
-  return { items, cuts: clampedCuts, outputDuration: roundTime(output) };
+  return { items, cuts: clampedCuts, outputDuration: roundTime(duration) };
 }
 
 /**
- * Convert a source time to output time, accounting for freezes. Anything at
- * or after a freeze's source time is pushed later by that freeze's duration,
- * so dialogue and subtitles starting at a freeze resume after it.
+ * Convert a source time to output time. Freezes replace video and audio
+ * keeps playing, so this is the identity; it exists so dubbing/subtitle code
+ * has one place to change if the timing model ever changes again.
  */
-export function mapSourceToOutput(config: EditConfig, sourceTime: number): number {
-  let shift = 0;
-  for (const freeze of resolveFreezes(config)) {
-    if (freeze.sourceTime <= sourceTime + TIME_EPSILON / 2) {
-      shift += freeze.duration;
-    }
-  }
-  return roundTime(sourceTime + shift);
+export function mapSourceToOutput(_config: EditConfig, sourceTime: number): number {
+  return roundTime(sourceTime);
 }
 
 // ---------------------------------------------------------------------------

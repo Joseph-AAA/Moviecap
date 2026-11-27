@@ -84,20 +84,40 @@ describe("generateDefaultEdit", () => {
     });
   });
 
-  it("creates 2 or 3 five-second zoom freezes, away from cuts and video edges", () => {
+  it("creates 2 or 3 five-second zoom freezes that never contain a cut or overlap", () => {
     const counts = new Set<number>();
-    for (let seed = 1; seed <= 60; seed++) {
-      const edit = generateDefaultEdit(300, seed, NOW);
-      counts.add(edit.freezes.length);
+    for (const duration of [48, 120, 300, 1800]) {
+      for (let seed = 1; seed <= 60; seed++) {
+        const edit = generateDefaultEdit(duration, seed, NOW);
+        const cuts = edit.segments.slice(1).map((s) => s.start);
+        if (duration >= 120) counts.add(edit.freezes.length);
 
-      for (const freeze of edit.freezes) {
-        assert.equal(freeze.duration, DEFAULT_FREEZE_DURATION);
-        assert.ok(freeze.zoomTo > freeze.zoomFrom && freeze.zoomTo <= 1.3);
-        assert.ok(freeze.sourceTime >= FREEZE_EDGE_MARGIN);
-        assert.ok(freeze.sourceTime <= 300 - FREEZE_EDGE_MARGIN);
+        edit.freezes.forEach((freeze, i) => {
+          const end = freeze.sourceTime + freeze.duration;
+          assert.equal(freeze.duration, DEFAULT_FREEZE_DURATION);
+          assert.ok(freeze.zoomTo > freeze.zoomFrom && freeze.zoomTo <= 1.3);
+          assert.ok(freeze.sourceTime >= FREEZE_EDGE_MARGIN);
+          assert.ok(end <= duration - FREEZE_EDGE_MARGIN);
+          for (const cut of cuts) {
+            assert.ok(
+              cut <= freeze.sourceTime - FREEZE_EDGE_MARGIN + 0.001 || cut >= end + FREEZE_EDGE_MARGIN - 0.001,
+              `cut ${cut} too close to freeze ${freeze.sourceTime}-${end} (seed ${seed}, ${duration}s)`,
+            );
+          }
+          if (i > 0) {
+            const prev = edit.freezes[i - 1];
+            assert.ok(freeze.sourceTime >= prev.sourceTime + prev.duration, "no overlap");
+          }
+        });
       }
     }
     assert.deepEqual([...counts].sort(), [2, 3]);
+  });
+
+  it("still fits freezes into a short 48 s video like the user's", () => {
+    for (let seed = 1; seed <= 30; seed++) {
+      assert.ok(generateDefaultEdit(48, seed, NOW).freezes.length >= 1);
+    }
   });
 
   it("adds no freezes to a video too short for them", () => {
@@ -153,25 +173,60 @@ describe("buildTimeline", () => {
     assert.equal(timeline.outputDuration, 48);
   });
 
-  it("freezes extend the output and no source time is lost", () => {
-    const applied = applyDefaultEdit(config(300), { seed: 42, now: NOW });
-    const timeline = buildTimeline(applied);
-    const freezeTotal = applied.defaultEdit!.freezes.reduce((sum, f) => sum + f.duration, 0);
+  it("freezes replace video: same length, items back to back, output time == source time", () => {
+    for (const seed of [1, 42, 1596253651]) {
+      const applied = applyDefaultEdit(config(300), { seed, now: NOW });
+      const timeline = buildTimeline(applied);
 
-    assert.equal(timeline.outputDuration, Math.round((300 + freezeTotal) * 1000) / 1000);
+      assert.equal(timeline.outputDuration, 300);
+      assert.equal(timeline.items[0].outputStart, 0);
+      assert.equal(timeline.items.at(-1)!.outputEnd, 300);
 
-    // Clips cover the source exactly once, in order.
-    const clips = timeline.items.filter((item) => item.type === "clip");
-    assert.equal(clips[0].sourceStart, 0);
-    assert.equal(clips.at(-1)!.sourceEnd, 300);
-    clips.forEach((clip, i) => {
-      if (i > 0) assert.equal(clip.sourceStart, clips[i - 1].sourceEnd);
+      timeline.items.forEach((item, i) => {
+        assert.equal(item.outputStart, item.sourceStart);
+        if (i > 0) assert.equal(item.sourceStart, timeline.items[i - 1].sourceEnd);
+      });
+
+      // Each freeze item replaces exactly its 5 s stretch.
+      const freezeItems = timeline.items.filter((item) => item.type === "freeze");
+      assert.equal(freezeItems.length, applied.defaultEdit!.freezes.length);
+      freezeItems.forEach((item) =>
+        assert.ok(Math.abs(item.sourceEnd - item.sourceStart - 5) < 0.001),
+      );
+    }
+  });
+
+  it("dissolves back to live video when a freeze ends", () => {
+    const base = config(30);
+    const edited: EditConfig = {
+      ...base,
+      custom: {
+        ...base.custom,
+        freezes: [{ id: "f", origin: "custom", sourceTime: 10, duration: 5, zoomFrom: 1, zoomTo: 1.1, zoomDirection: "center" }],
+      },
+    };
+    const timeline = buildTimeline(edited);
+    assert.deepEqual(timeline.items.map((i) => i.type), ["clip", "freeze", "clip"]);
+    assert.equal(timeline.cuts[0].transition, null); // entering: seamless
+    assert.equal(timeline.cuts[1].transition?.kind, "dissolve"); // leaving: dissolve
+  });
+
+  it("drops a later freeze that overlaps an earlier one, and transitions inside a freeze", () => {
+    const base = config(60);
+    const freeze = (id: string, t: number) => ({
+      id, origin: "custom" as const, sourceTime: t, duration: 5, zoomFrom: 1, zoomTo: 1.1, zoomDirection: "center" as const,
     });
-
-    // Output items are back to back.
-    timeline.items.forEach((item, i) => {
-      if (i > 0) assert.equal(item.outputStart, timeline.items[i - 1].outputEnd);
-    });
+    const edited: EditConfig = {
+      ...base,
+      custom: {
+        transitions: [{ id: "t", origin: "custom", at: 12, kind: "fade", duration: 0.4 }],
+        freezes: [freeze("a", 10), freeze("b", 13)],
+        blurs: [],
+      },
+    };
+    const timeline = buildTimeline(edited);
+    assert.equal(timeline.items.filter((i) => i.type === "freeze").length, 1);
+    assert.ok(timeline.cuts.every((c) => c.transition?.id !== "t"));
   });
 
   it("custom transition wins over default at the same cut; default returns when removed", () => {
@@ -197,23 +252,9 @@ describe("buildTimeline", () => {
 });
 
 describe("mapSourceToOutput", () => {
-  it("shifts times at/after each freeze by the freeze duration", () => {
-    const base = config(60);
-    const edited: EditConfig = {
-      ...base,
-      custom: {
-        ...base.custom,
-        freezes: [
-          { id: "f1", origin: "custom", sourceTime: 10, duration: 5, zoomFrom: 1, zoomTo: 1.1, zoomDirection: "center" },
-          { id: "f2", origin: "custom", sourceTime: 30, duration: 3, zoomFrom: 1, zoomTo: 1.1, zoomDirection: "center" },
-        ],
-      },
-    };
-
-    assert.equal(mapSourceToOutput(edited, 5), 5);
-    assert.equal(mapSourceToOutput(edited, 10), 15); // a line starting at the freeze resumes after it
-    assert.equal(mapSourceToOutput(edited, 20), 25);
-    assert.equal(mapSourceToOutput(edited, 45), 53);
+  it("is the identity because audio keeps playing under freezes", () => {
+    const applied = applyDefaultEdit(config(120), { seed: 9, now: NOW });
+    for (const t of [0, 12.5, 60, 119]) assert.equal(mapSourceToOutput(applied, t), t);
   });
 });
 

@@ -8,12 +8,12 @@
  *     clip   : trim -> normalise -> (tpad if a transition follows)
  *     freeze : one frame -> 2x upscale -> zoompan (eased zoom) -> normalise
  *   items are joined left to right with xfade (transition) or concat (cut).
- *   Audio: clips use the matching atrim, freezes use silence, all concat'ed.
+ *   Audio: the ORIGINAL soundtrack, uncut. Freezes replace video only, so
+ *   the audio keeps playing under them and output time == source time.
  *
  * Sync guarantee: a transition pads the outgoing VIDEO item by exactly the
- * overlap xfade removes, so every video item starts at the same output time
- * as in the timeline. Audio pieces are NOT padded and are simply
- * concatenated, so each audio piece starts at that same time too.
+ * overlap xfade removes, so every video item starts at its source time and
+ * the video stays aligned with the untouched audio.
  *
  * Only filters present in the bundled FFmpegKit "min" build are used
  * (checked against the shipped libavfilter.so).
@@ -113,8 +113,6 @@ export function buildRenderArgs(input: RenderCommandInput): string[] {
 
   /** Video length of each item including transition padding. */
   const itemLengths: number[] = [];
-  /** Real length of each item (what the audio uses). */
-  const baseLengths: number[] = [];
 
   items.forEach((item, i) => {
     const pad = padAfter[i] > 0 ? `,tpad=stop_mode=clone:stop_duration=${num(padAfter[i])}` : "";
@@ -124,13 +122,12 @@ export function buildRenderArgs(input: RenderCommandInput): string[] {
         `[${videoLabels[i]}]trim=start=${num(item.sourceStart)}:end=${num(item.sourceEnd)},` +
           `setpts=PTS-STARTPTS,${normalise}${pad}[v${i}]`,
       );
-      baseLengths.push(item.sourceEnd - item.sourceStart);
-      itemLengths.push(baseLengths[i] + padAfter[i]);
+      itemLengths.push(item.sourceEnd - item.sourceStart + padAfter[i]);
       return;
     }
 
     const { freeze } = item;
-    const frames = Math.max(2, Math.round(freeze.duration * fps));
+    const frames = Math.max(2, Math.round((item.sourceEnd - item.sourceStart) * fps));
     // Smoothstep easing: gradual start and gradual stop (cinematic, no jerk).
     const p = `(on/${frames - 1})`;
     const zoom =
@@ -138,15 +135,14 @@ export function buildRenderArgs(input: RenderCommandInput): string[] {
     const origin = zoomOrigin(freeze.zoomDirection);
 
     filters.push(
-      `[${videoLabels[i]}]trim=start=${num(freeze.sourceTime)},setpts=PTS-STARTPTS,trim=end_frame=1,` +
+      `[${videoLabels[i]}]trim=start=${num(item.sourceStart)},setpts=PTS-STARTPTS,trim=end_frame=1,` +
         // Upscale before zoompan so its integer crop steps are sub-pixel in
         // the output: removes the well-known zoompan jitter.
         `scale=${width * 2}:${height * 2}:flags=lanczos,` +
         `zoompan=z='${zoom}':x='${origin.x}':y='${origin.y}':d=${frames}:s=${width}x${height}:fps=${fps},` +
         `${normalise}${pad}[v${i}]`,
     );
-    baseLengths.push(frames / fps);
-    itemLengths.push(baseLengths[i] + padAfter[i]);
+    itemLengths.push(frames / fps + padAfter[i]);
   });
 
   // ---- Join video: xfade at transitions, concat at plain cuts -------------
@@ -172,35 +168,12 @@ export function buildRenderArgs(input: RenderCommandInput): string[] {
   }
   filters.push(`[${current}]null[vout]`);
 
-  // ---- Audio -------------------------------------------------------------
+  // ---- Audio: the original soundtrack plays straight through -------------
   const audioFormat = `aformat=sample_rates=${AUDIO_RATE}:channel_layouts=stereo`;
-  const clipIndexes = items.flatMap((item, i) => (item.type === "clip" ? [i] : []));
-  const useSourceAudio = source.hasAudio && clipIndexes.length > 0;
-
-  if (useSourceAudio) {
-    filters.push(
-      clipIndexes.length === 1
-        ? `[0:a]anull[as${clipIndexes[0]}]`
-        : `[0:a]asplit=${clipIndexes.length}${clipIndexes.map((i) => `[as${i}]`).join("")}`,
-    );
-  }
-
-  items.forEach((item, i) => {
-    if (item.type === "clip" && useSourceAudio) {
-      filters.push(
-        `[as${i}]atrim=start=${num(item.sourceStart)}:end=${num(item.sourceEnd)},asetpts=PTS-STARTPTS,` +
-          `${audioFormat}[a${i}]`,
-      );
-    } else {
-      // Freeze (or no source audio): silence. Original audio pauses here.
-      filters.push(
-        `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_RATE},atrim=duration=${num(baseLengths[i])},${audioFormat}[a${i}]`,
-      );
-    }
-  });
-
   filters.push(
-    `${items.map((_, i) => `[a${i}]`).join("")}concat=n=${items.length}:v=0:a=1[aout]`,
+    source.hasAudio
+      ? `[0:a]atrim=duration=${num(timeline.outputDuration)},asetpts=PTS-STARTPTS,${audioFormat}[aout]`
+      : `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_RATE},atrim=duration=${num(timeline.outputDuration)},${audioFormat}[aout]`,
   );
 
   // ---- Encoding ----------------------------------------------------------

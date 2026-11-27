@@ -47,12 +47,13 @@ describe("buildRenderArgs", () => {
     assert.notEqual(args.at(-1), args[args.indexOf("-i") + 1]);
   });
 
-  it("matches the user's real phone edit (seed 1596253651): 3 clips + 2 freezes", () => {
+  it("renders one zoompan per freeze and an xfade per transition", () => {
     const { timeline, graph } = render(1596253651);
-    assert.equal(timeline.items.filter((i) => i.type === "clip").length, 5); // 3 segments split by 2 freezes
-    assert.equal(timeline.items.filter((i) => i.type === "freeze").length, 2);
-    assert.equal((graph.match(/zoompan=/g) ?? []).length, 2);
-    assert.equal((graph.match(/xfade=/g) ?? []).length, 2);
+    const freezes = timeline.items.filter((i) => i.type === "freeze").length;
+    const transitions = timeline.cuts.filter((c) => c.transition).length;
+    assert.ok(freezes >= 1);
+    assert.equal((graph.match(/zoompan=/g) ?? []).length, freezes);
+    assert.equal((graph.match(/xfade=/g) ?? []).length, transitions);
   });
 
   it("starts every xfade exactly where the incoming item starts on the timeline (sync)", () => {
@@ -70,11 +71,11 @@ describe("buildRenderArgs", () => {
     }
   });
 
-  it("silences audio during freezes and never pads audio (no drift)", () => {
+  it("keeps the original audio playing straight through (also under freezes)", () => {
     const { graph } = render(1596253651);
-    assert.equal((graph.match(/anullsrc=/g) ?? []).length, 2);
-    assert.ok(!graph.includes("apad"));
-    assert.match(graph, /concat=n=7:v=0:a=1\[aout\]/);
+    assert.ok(!graph.includes("anullsrc"));
+    assert.ok(!graph.includes("asplit"));
+    assert.match(graph, /\[0:a\]atrim=duration=48,asetpts=PTS-STARTPTS,aformat=[^;]+\[aout\]/);
   });
 
   it("uses only filters available in the bundled FFmpegKit min build", () => {
