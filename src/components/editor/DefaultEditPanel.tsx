@@ -166,8 +166,9 @@ export default function DefaultEditPanel({
       </View>
 
       <Text style={{ color: C.secondaryText, fontSize: 12 }}>
-        Random 15–20 s cuts · subtle 0.4 s dissolves · 2–3 freeze frames that
-        zoom slowly for 5 s while the audio keeps playing
+        Default: an effect every 6 s (under 1 min) or every 15 s (1 min+), each
+        randomly a transition of any type or a zoom-in freeze · audio keeps
+        playing
       </Text>
 
       <View style={{ flexDirection: "row", gap: 10 }}>

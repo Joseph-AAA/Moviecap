@@ -1,5 +1,5 @@
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState, type ComponentRef } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -10,7 +10,7 @@ import {
 } from "react-native";
 
 import ExportPlayerModal from "@/components/editor/ExportPlayerModal";
-import ProjectMenu from "@/components/projects/ProjectMenu";
+import ProjectMenu, { type MenuAnchor } from "@/components/projects/ProjectMenu";
 import RenameProjectModal from "@/components/projects/RenameProjectModal";
 import { MovieCapColors as C } from "@/constants/theme";
 import { getRecentExports, updateProjectExportName } from "@/services/database";
@@ -56,7 +56,15 @@ export default function ClipList({
   const [clips, setClips] = useState<RecentExport[]>([]);
   const [playing, setPlaying] = useState<RecentExport | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [menuClipId, setMenuClipId] = useState<string | null>(null);
+  // One shared popup: which clip it's for and where its ⋮ button is.
+  const [menu, setMenu] = useState<{ clip: RecentExport; anchor: MenuAnchor } | null>(null);
+  const dotsRefs = useRef<Record<string, ComponentRef<typeof View> | null>>({});
+  const openMenu = (clip: RecentExport) => {
+    dotsRefs.current[clip.id]?.measureInWindow((x, y, width, height) =>
+      setMenu({ clip, anchor: { x, y, width, height } }),
+    );
+  };
+  const closeMenu = () => setMenu(null);
   const [renamingClip, setRenamingClip] = useState<RecentExport | null>(null);
   const [isSavingName, setIsSavingName] = useState(false);
 
@@ -80,7 +88,7 @@ export default function ClipList({
 
       return () => {
         isActive = false;
-        setMenuClipId(null);
+        setMenu(null);
       };
       // refreshKey is intentionally a trigger-only dependency.
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -152,19 +160,13 @@ export default function ClipList({
       <View style={{ gap: 12 }}>
         {clips.map((clip) => {
           const isDeleting = deletingId === clip.id;
-          const isMenuOpen = menuClipId === clip.id;
           const displayName = clipDisplayName(clip, clip.projectName);
 
           return (
-            // Raise the open card so its dropdown menu sits above the next card.
-            <View
-              key={clip.id}
-              style={{ position: "relative", zIndex: isMenuOpen ? 10 : 0 }}
-            >
+            <View key={clip.id}>
               <Pressable
                 // Card opens the clip in the editor; the thumbnail plays it.
                 onPress={() => {
-                  setMenuClipId(null);
                   router.push({
                     pathname: "/editor/[id]",
                     params: { id: clip.projectId, clipId: clip.id },
@@ -185,7 +187,6 @@ export default function ClipList({
               >
                 <Pressable
                   onPress={() => {
-                    setMenuClipId(null);
                     setPlaying(clip);
                   }}
                   hitSlop={4}
@@ -270,9 +271,10 @@ export default function ClipList({
                     <ActivityIndicator size="small" color={C.danger} />
                   ) : (
                     <Pressable
-                      onPress={() =>
-                        setMenuClipId((open) => (open === clip.id ? null : clip.id))
-                      }
+                      ref={(node) => {
+                        dotsRefs.current[clip.id] = node;
+                      }}
+                      onPress={() => openMenu(clip)}
                       hitSlop={8}
                       accessibilityLabel="Clip options"
                       style={{
@@ -295,23 +297,26 @@ export default function ClipList({
                   ))}
               </Pressable>
 
-              {allowManage && (
-                <ProjectMenu
-                  visible={isMenuOpen}
-                  onRename={() => {
-                    setMenuClipId(null);
-                    setRenamingClip(clip);
-                  }}
-                  onDelete={() => {
-                    setMenuClipId(null);
-                    confirmDelete(clip);
-                  }}
-                />
-              )}
             </View>
           );
         })}
       </View>
+
+      {allowManage && (
+        <ProjectMenu
+          visible={menu !== null}
+          anchor={menu?.anchor ?? null}
+          onClose={closeMenu}
+          onRename={() => {
+            if (menu) setRenamingClip(menu.clip);
+            closeMenu();
+          }}
+          onDelete={() => {
+            if (menu) confirmDelete(menu.clip);
+            closeMenu();
+          }}
+        />
+      )}
 
       {playing && (
         <ExportPlayerModal

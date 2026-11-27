@@ -38,6 +38,8 @@ interface VideoPreviewProps {
 }
 
 const MIN_TRIM_DURATION = 0.5;
+/** Seconds before the end that count as "at the end" for play/restart. */
+const END_TOLERANCE = 0.15;
 const HANDLE_TOUCH_WIDTH = 44;
 const PLAYHEAD_TOUCH_WIDTH = 40;
 
@@ -157,7 +159,27 @@ export default function VideoPreview({
     setCurrentTime(time);
   });
 
+  // Set when playback runs off the end of the video (see handlePlayPause).
+  const endedRef = useRef(false);
+  // Bumped when a new source of the same length loads (original <-> edited),
+  // so the timeline thumbnails are regenerated from the new picture.
+  const [sourceVersion, setSourceVersion] = useState(0);
+  useEventListener(player, "playToEnd", () => {
+    endedRef.current = true;
+  });
+
   useEventListener(player, "sourceLoad", ({ duration: videoDuration }) => {
+    // Switching between the original and the edited preview: same length
+    // (effects never change timing), so keep the trim and the playhead.
+    const sameLength =
+      durationRef.current > 0 && Math.abs(durationRef.current - videoDuration) < 0.5;
+    if (sameLength) {
+      player.currentTime = currentTimeRef.current;
+      endedRef.current = false;
+      setSourceVersion((v) => v + 1);
+      return;
+    }
+
     durationRef.current = videoDuration;
     trimStartRef.current = 0;
     trimEndRef.current = videoDuration;
@@ -208,7 +230,7 @@ export default function VideoPreview({
     return () => {
       isActive = false;
     };
-  }, [duration, player]);
+  }, [duration, player, sourceVersion]);
 
   const formatTime = (seconds: number) => {
     if (!Number.isFinite(seconds) || seconds < 0) return "00:00";
@@ -368,7 +390,13 @@ export default function VideoPreview({
       return;
     }
 
-    if (currentTimeRef.current >= trimEndRef.current) {
+    // At the end (of the video or of the trim selection): start again from
+    // the trim start. The player can stop a few ms before its reported
+    // duration, so also treat "very close to the end" as the end.
+    const atEnd =
+      endedRef.current || currentTimeRef.current >= trimEndRef.current - END_TOLERANCE;
+    if (atEnd) {
+      endedRef.current = false;
       setPlayheadTime(trimStartRef.current);
     }
 

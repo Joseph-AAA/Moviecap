@@ -1,6 +1,18 @@
 import DefaultEditPanel from "@/components/editor/DefaultEditPanel";
 import ExportCard from "@/components/editor/ExportCard";
+import TransitionPreview, {
+  type TransitionPreviewRequest,
+} from "@/components/editor/TransitionPreview";
 import TransitionsPanel from "@/components/editor/TransitionsPanel";
+import EditedPreviewBar, {
+  type EditedPreviewStatus,
+} from "@/components/editor/EditedPreviewBar";
+import {
+  isRenderingAvailable,
+  RenderCancelledError,
+  renderEditedPreview,
+  type RenderHandle,
+} from "@/services/render/renderProject";
 import VideoPreview from "@/components/editor/VideoPreview";
 import { MovieCapColors as C } from "@/constants/theme";
 import {
@@ -202,11 +214,85 @@ export default function EditorScreen() {
   const handleRemoveTransition = (at: number) =>
     void updateEdit((base) => removeCustomTransition(base, at));
 
-  // Start 1.5 s before the cut so the transition is visible.
-  const handlePreviewCut = (at: number) =>
-    setSeekRequest({ time: Math.max(0, at - 1.5), key: Date.now() });
+  // Exact preview of one transition (rendered like the export). Unsaved
+  // choices from the editor sheet are applied to a temporary copy only.
+  const [previewRequest, setPreviewRequest] = useState<TransitionPreviewRequest | null>(null);
+  const handlePreviewTransition = (at: number, kind: TransitionKind, duration: number) => {
+    const base =
+      editConfig ?? (project ? createEmptyEditConfig(project.originalUri, videoDuration) : null);
+    if (!base) return;
+
+    if (!isRenderingAvailable()) {
+      // Older app build: fall back to watching the cut in the live preview.
+      setSeekRequest({ time: Math.max(0, at - 1.5), key: Date.now() });
+      return;
+    }
+
+    const config = { ...base, sourceDuration: videoDuration || base.sourceDuration };
+    const current = buildTimeline(config).cuts.find((c) => Math.abs(c.sourceTime - at) < 0.05);
+    const isUnsaved =
+      !current?.transition ||
+      current.transition.kind !== kind ||
+      current.transition.duration !== duration;
+    const previewConfig = isUnsaved ? setCustomTransition(config, at, kind, duration) : config;
+    // Use the length that will really be rendered (long ones are shortened to fit).
+    const resolved = buildTimeline(previewConfig).cuts.find((c) => Math.abs(c.sourceTime - at) < 0.05);
+
+    setPreviewRequest({
+      config: previewConfig,
+      at,
+      kind,
+      duration: resolved?.transition?.duration ?? duration,
+    });
+  };
 
   // What the live preview should show (approximate; export is exact).
+  // ---- Edited preview: the whole edit rendered small, shown in the player --
+  // Re-rendered (after a short pause) whenever the edit changes; cached per
+  // edit, so reopening an unchanged edit is instant.
+  const [editedPreview, setEditedPreview] = useState<{
+    status: EditedPreviewStatus;
+    progress: number;
+    uri: string | null;
+  }>({ status: "rendering", progress: 0, uri: null });
+  const [showEdited, setShowEdited] = useState(true);
+  const [previewRun, setPreviewRun] = useState(0);
+  const previewHandleRef = useRef<RenderHandle | null>(null);
+  const wantsEditedPreview =
+    !clip && project !== null && editConfig !== null && hasEditEffects(editConfig) && isRenderingAvailable();
+
+  useEffect(() => {
+    if (!wantsEditedPreview || !project || !editConfig) return;
+
+    let active = true;
+    let handle: RenderHandle | null = null;
+    const timer = setTimeout(() => {
+      setEditedPreview({ status: "rendering", progress: 0, uri: null });
+      handle = renderEditedPreview(project.id, editConfig, (progress) => {
+        if (active) setEditedPreview((p) => ({ ...p, progress }));
+      });
+      previewHandleRef.current = handle;
+      handle.done
+        .then((uri) => {
+          if (active) setEditedPreview({ status: "ready", progress: 1, uri });
+        })
+        .catch((err) => {
+          if (!active || err instanceof RenderCancelledError) return;
+          console.warn("Edited preview failed:", err);
+          setEditedPreview({ status: "error", progress: 0, uri: null });
+        });
+    }, 700);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      handle?.cancel();
+    };
+  }, [wantsEditedPreview, project, editConfig, previewRun]);
+
+  const showingEdited =
+    wantsEditedPreview && showEdited && editedPreview.status === "ready" && editedPreview.uri !== null;
+
   const effectsPreview = useMemo(() => {
     if (clip || !editConfig) return null;
 
@@ -256,14 +342,24 @@ export default function EditorScreen() {
           {/* key resets the player when switching between original and clip */}
           <VideoPreview
             key={clip?.uri ?? project.originalUri}
-            uri={clip?.uri ?? project.originalUri}
+            uri={showingEdited ? editedPreview.uri! : (clip?.uri ?? project.originalUri)}
             onTrimChange={handleTrimChange}
             onDraggingChange={handleDraggingChange}
             onDurationLoaded={setVideoDuration}
             onPlayheadChange={handlePlayheadChange}
             seekRequest={seekRequest}
-            effectsPreview={effectsPreview}
+            // The edited preview already contains the real effects.
+            effectsPreview={showingEdited ? null : effectsPreview}
           />
+
+          {wantsEditedPreview && (
+            <EditedPreviewBar
+              status={editedPreview.status}
+              progress={editedPreview.progress}
+              showEdited={showEdited}
+              onShowEditedChange={setShowEdited}
+            />
+          )}
 
           {/* The ONE Export: trim selection, with effects when applied. */}
           {videoDuration > 0 && trimRange.end > trimRange.start && (
@@ -273,6 +369,10 @@ export default function EditorScreen() {
               config={clip ? null : editConfig}
               range={trimRange}
               videoDuration={videoDuration}
+              // Pause the background preview while exporting (CPU and the
+              // export's cleanup), then resume it.
+              onExportStart={() => previewHandleRef.current?.cancel()}
+              onExportEnd={() => setPreviewRun((n) => n + 1)}
             />
           )}
 
@@ -285,7 +385,13 @@ export default function EditorScreen() {
               onUnapply={handleUnapplyDefault}
               hasMyDefault={myDefault !== null}
               onApplyMine={handleApplyMine}
-              onSetUpMine={() => router.push("/my-default")}
+              onSetUpMine={() =>
+                router.push({
+                  pathname: "/my-default",
+                  // The real length, for "exact times" and the result list.
+                  params: { videoDuration: String(videoDuration) },
+                })
+              }
               onSaveAsMine={() => void handleSaveAsMine()}
               canSaveAsMine={editConfig !== null && hasEditEffects(editConfig)}
             />
@@ -299,7 +405,7 @@ export default function EditorScreen() {
               }
               isBusy={isSavingEdit}
               getPlayheadTime={() => playheadRef.current}
-              onPreviewCut={handlePreviewCut}
+              onPreviewTransition={handlePreviewTransition}
               onSave={handleSaveTransition}
               onRemoveCustom={handleRemoveTransition}
             />
@@ -317,6 +423,9 @@ export default function EditorScreen() {
           </View>
         </ScrollView>
       ) : null}
+      {previewRequest && (
+        <TransitionPreview request={previewRequest} onClose={() => setPreviewRequest(null)} />
+      )}
     </SafeAreaView>
   );
 }

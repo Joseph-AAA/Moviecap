@@ -19,9 +19,11 @@
  * every piece is cut to its exact frame count, so the joined video has
  * exactly round(duration * fps) frames and lines up with the audio.
  *
- * A transition into item i is rendered inside piece i: the previous item's
- * final picture is held for the transition and dissolves into the start of
- * item i. Nothing is added or removed, so lengths never change.
+ * A transition into item i is rendered inside piece i as an OVERLAP: the
+ * previous item's last seconds (still moving) are mixed with item i's first
+ * seconds, so the effect shows between two different moments. Item i still
+ * starts at the cut and the audio is the untouched original, so nothing is
+ * skipped and lengths never change.
  *
  * Only filters present in the bundled FFmpegKit "min" build are used.
  */
@@ -52,11 +54,70 @@ export interface PiecePlan {
     | { type: "clip"; sourceStart: number }
     | { type: "freeze"; freeze: FreezeEffect; zoomFrom: number; zoomTo: number };
   /**
-   * Dissolve INTO this piece. Its still is the last frame of the previous
-   * piece's rendered file (`fromPiece`), so it already has the exact final
-   * zoom of a freeze, and nothing re-reads the long source video.
+   * Transition INTO this piece. The outgoing layer is the last `frames` of
+   * the previous piece's rendered file (`fromPiece`), so it already contains
+   * a freeze's zoom, and nothing re-reads the long source video.
    */
   transitionIn: { kind: TransitionKind; frames: number; fromPiece: number } | null;
+}
+
+/**
+ * xfade options for a transition kind (built-in xfade transitions in
+ * FFmpeg 6.0). Checkerboard and snow drift use maskTransition instead.
+ */
+export function xfadeTransition(kind: TransitionKind): string {
+  switch (kind) {
+    case "wipe":
+      return "transition=wipeleft";
+    case "pixelize":
+      return "transition=pixelize";
+    case "elastic":
+      return "transition=squeezeh";
+    case "checkerboard":
+    case "snowdrift":
+      // Rendered with maskTransition (fast); xfade fade is only a fallback.
+      return "transition=fade";
+    default:
+      return `transition=${kind}`;
+  }
+}
+
+/**
+ * Fast mask-based version of a transition, or null to use xfade.
+ * `expr` is a geq expression giving 0 (old picture) .. 255 (new picture);
+ * X/W and Y/H are relative so it works on every plane; T is seconds.
+ */
+export function maskTransition(
+  kind: TransitionKind,
+  seconds: number,
+  width: number,
+  height: number,
+): { width: number; height: number; expr: string } | null {
+  const progress = `clip(T/${num(seconds, 4)},0,1)`;
+  switch (kind) {
+    case "checkerboard": {
+      // 8 squares across. Even squares change in the first half, odd ones
+      // in the second half, each with a short soft fade.
+      const rows = even((8 * height) / width);
+      const parity = `mod(floor(X/W*8)+floor(Y/H*${rows}),2)`;
+      return {
+        width: 8,
+        height: rows,
+        expr: `255*clip((${progress}-${parity}*0.5)*2,0,1)`,
+      };
+    }
+    case "snowdrift": {
+      // Chunky snow: a noisy edge drifting from the top to the bottom.
+      const cols = 72;
+      return {
+        width: cols,
+        height: even((cols * height) / width),
+        expr: `255*gte(${progress}*1.6-0.6*Y/H-0.4*random(0),0)`,
+      };
+    }
+    default:
+      return null;
+  }
 }
 
 /** Fixed-precision number for filter strings (avoids 1e-7 style output). */
@@ -200,14 +261,43 @@ export function buildPieceArgs(input: PieceArgsInput): string[] {
   if (piece.transitionIn) {
     const { kind, frames } = piece.transitionIn;
     if (!previousPiecePath) throw new Error("A transition needs the previous piece's file.");
-    // Input 1: the last frame of the previous piece. -sseof seeks to just
-    // before its end, -t keeps the read to a few frames.
-    inputs.push("-sseof", num(-1.2 / fps, 4), "-t", num(STILL_READ_SECONDS), "-i", previousPiecePath);
-    filters.push(
-      `[1:v]trim=end_frame=1,setpts=PTS-STARTPTS,${normalise},` +
-        `tpad=stop_mode=clone:stop_duration=${num(frames / fps + 1)},trim=end_frame=${frames}[h]`,
+    // Input 1: the LAST `frames` of the previous piece, still MOVING (an
+    // overlap transition between two different moments, so the effect is
+    // clearly visible). -sseof seeks that far before its end; -t limits the
+    // read. The incoming piece still starts at the cut and the original
+    // audio is untouched, so nothing is skipped and sync is kept.
+    inputs.push(
+      "-sseof",
+      num(-frames / fps, 4),
+      "-t",
+      num(frames / fps + STILL_READ_SECONDS),
+      "-i",
+      previousPiecePath,
     );
-    filters.push(`[h][o]xfade=transition=${kind}:duration=${num(frames / fps, 4)}:offset=0[v]`);
+    const mask = maskTransition(kind, frames / fps, width, height);
+    // If the read comes up a frame short, repeat its last frame.
+    const outgoing = (length: number) =>
+      `[1:v]setpts=PTS-STARTPTS,${normalise},` +
+      `tpad=stop_mode=clone:stop_duration=${num(length / fps + 1)},trim=end_frame=${length}[h]`;
+
+    if (!mask) {
+      filters.push(outgoing(frames));
+      filters.push(`[h][o]xfade=${xfadeTransition(kind)}:duration=${num(frames / fps, 4)}:offset=0[v]`);
+    } else {
+      // Mask transitions: the pattern is computed on a TINY image and
+      // enlarged with hard edges, then mixes old (A) into new (B). This is
+      // ~100x faster than a per-pixel xfade expression on a phone.
+      // A is padded to the whole piece; after the transition the mask is
+      // fully "new", so only B shows.
+      filters.push(outgoing(piece.frames));
+      filters.push(
+        `color=c=black:s=${mask.width}x${mask.height}:r=${fps}:d=${num(piece.frames / fps + 1)},format=yuv420p,` +
+          `geq=lum='${mask.expr}':cb='${mask.expr}':cr='${mask.expr}',` +
+          `scale=${width}:${height}:flags=neighbor,format=yuv420p,setsar=1,settb=AVTB,` +
+          `trim=end_frame=${piece.frames}[m]`,
+      );
+      filters.push(`[h][o][m]maskedmerge[v]`);
+    }
   }
 
   const videoCodec = videoCodecArgs(encoder, source, "piece");

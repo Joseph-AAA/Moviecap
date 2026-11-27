@@ -1,4 +1,4 @@
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
@@ -7,6 +7,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -14,6 +15,11 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { MovieCapColors as C } from "@/constants/theme";
+import {
+  DEFAULT_CUSTOM_TRANSITION_DURATION,
+  TRANSITION_DURATION_CHOICES,
+  TRANSITION_OPTIONS as KINDS,
+} from "@/constants/transitions";
 import { getMyDefaultPreset, saveMyDefaultPreset } from "@/services/database";
 import {
   DEFAULT_FREEZE_DURATION,
@@ -21,36 +27,30 @@ import {
   PRESET_FREEZE_DURATIONS,
   PRESET_ZOOM_LEVELS,
   createStarterPreset,
+  presetEffectTimes,
 } from "@/services/timeline/editTimeline";
 import {
-  MAX_REFERENCE_DURATION,
-  MIN_REFERENCE_DURATION,
-  PRESET_TRANSITION_DURATIONS,
+  EDGE_SECONDS,
+  MAX_PATTERN_LENGTH,
+  MIN_PATTERN_LENGTH,
   dragMarker,
   findFreeSpot,
   formatClock,
   isMarkerOverlapping,
+  layoutLength,
   parseClock,
   presetProblems,
-  referenceDuration,
   settleMarker,
   sortPreset,
   type MarkerRef,
 } from "@/services/timeline/presetLayout";
-import type { MyDefaultPreset, TransitionKind, ZoomDirection } from "@/types/edit";
+import type { MyDefaultPreset, ZoomDirection } from "@/types/edit";
 
 const TRANSITION_COLOR = "#3B82F6"; // blue
 const FREEZE_COLOR = "#F59E0B"; // amber
 const BLOCKED_COLOR = "#EF4444"; // red: dragging over another line
 const LABEL_WIDTH = 52;
-
-const KINDS: { kind: TransitionKind; label: string }[] = [
-  { kind: "dissolve", label: "Dissolve" },
-  { kind: "fade", label: "Crossfade" },
-  { kind: "fadeblack", label: "Fade to black" },
-  { kind: "slideleft", label: "Slide left" },
-  { kind: "slideright", label: "Slide right" },
-];
+const PREVIEW_TIMES = 12;
 
 const DIRECTIONS: { value: ZoomDirection; label: string }[] = [
   { value: "center", label: "Center" },
@@ -61,13 +61,18 @@ const DIRECTIONS: { value: ZoomDirection; label: string }[] = [
 ];
 
 /**
- * Set up "My Default": the user's own reusable default edit, laid out on a
- * reference length (e.g. 2:10). Blue lines are transitions, amber lines are
- * freezes; drag them on the timeline. Positions are saved relative to the
- * length, so My Default fits any video.
+ * Set up "My Default": the user's own reusable default edit, in SECONDS.
+ * - Repeat ON: lay out one round (editable Total length); it repeats until
+ *   the video ends.
+ * - Repeat OFF: lay out exact times on the current video's real length.
+ * Blue lines are transitions, amber lines are freezes; drag them freely.
  */
 export default function MyDefaultScreen() {
   const router = useRouter();
+  // The video the user came from (Edit page), for the real length.
+  const params = useLocalSearchParams<{ videoDuration?: string }>();
+  const videoDuration = Number(params.videoDuration) > 0 ? Number(params.videoDuration) : 0;
+
   const [preset, setPreset] = useState<MyDefaultPreset | null>(null);
   const [lengthText, setLengthText] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -80,33 +85,78 @@ export default function MyDefaultScreen() {
         if (!isActive) return;
         const loaded = saved ?? createStarterPreset();
         setPreset(loaded);
-        setLengthText(formatClock(referenceDuration(loaded)));
+        setLengthText(formatClock(loaded.patternLength));
       })
       .catch((error) => {
         console.error("Failed to load My Default:", error);
         if (!isActive) return;
         const starter = createStarterPreset();
         setPreset(starter);
-        setLengthText(formatClock(referenceDuration(starter)));
+        setLengthText(formatClock(starter.patternLength));
       });
     return () => {
       isActive = false;
     };
   }, []);
 
-  const problems = preset ? presetProblems(preset) : [];
-  const reference = preset ? referenceDuration(preset) : 0;
+  const length = preset ? layoutLength(preset, videoDuration) : 0;
+
+  // Exact times (OFF): lines after the video's end are HIDDEN (not deleted,
+  // no warnings); they come back when Repeat is turned ON.
+  const split = (full: MyDefaultPreset) => {
+    const fits = (end: number) => full.repeat || end <= length - EDGE_SECONDS + 0.001;
+    return {
+      visible: {
+        ...full,
+        transitions: full.transitions.filter((t) => fits(t.at)),
+        freezes: full.freezes.filter((f) => fits(f.at + f.duration)),
+      },
+      hidden: {
+        transitions: full.transitions.filter((t) => !fits(t.at)),
+        freezes: full.freezes.filter((f) => !fits(f.at + f.duration)),
+      },
+    };
+  };
+  /** Edit only the visible lines/cards; hidden ones are kept as they are. */
+  const editVisible = (change: (visible: MyDefaultPreset) => MyDefaultPreset) =>
+    setPreset((full) => {
+      if (!full) return full;
+      const { visible, hidden } = split(full);
+      const next = change(visible);
+      return sortPreset({
+        ...next,
+        transitions: [...next.transitions, ...hidden.transitions],
+        freezes: [...next.freezes, ...hidden.freezes],
+      });
+    });
+  const view = preset ? split(preset) : null;
+  const visiblePreset = view?.visible ?? null;
+  const hiddenCount = view
+    ? { transitions: view.hidden.transitions.length, freezes: view.hidden.freezes.length }
+    : { transitions: 0, freezes: 0 };
+  const problems = visiblePreset ? presetProblems(visiblePreset, length) : [];
+  const effectTimes =
+    preset && videoDuration > 0 ? presetEffectTimes(videoDuration, preset) : null;
 
   const commitLength = () => {
     if (!preset) return;
     const seconds = parseClock(lengthText);
-    if (seconds === null || seconds < MIN_REFERENCE_DURATION || seconds > MAX_REFERENCE_DURATION) {
-      Alert.alert("Check the length", "Type minutes:seconds, for example 2:10 (between 0:10 and 3:00:00).");
-      setLengthText(formatClock(reference));
+    if (seconds === null || seconds < MIN_PATTERN_LENGTH || seconds > MAX_PATTERN_LENGTH) {
+      Alert.alert("Check the length", "Type minutes:seconds, for example 0:50 or 2:00.");
+      setLengthText(formatClock(preset.patternLength));
       return;
     }
-    setPreset({ ...preset, referenceDuration: seconds });
+    setPreset({ ...preset, patternLength: seconds });
     setLengthText(formatClock(seconds));
+  };
+
+  const setRepeat = (repeat: boolean) => {
+    if (!preset) return;
+    if (!repeat && videoDuration <= 0) {
+      Alert.alert("Open from a video", "Exact times use the real video length. Open My Default from a video's Edit page.");
+      return;
+    }
+    setPreset({ ...preset, repeat });
   };
 
   const save = async () => {
@@ -117,12 +167,7 @@ export default function MyDefaultScreen() {
     }
     try {
       setIsSaving(true);
-      await saveMyDefaultPreset({
-        ...preset,
-        transitions: [...preset.transitions].sort((a, b) => a.position - b.position),
-        freezes: [...preset.freezes].sort((a, b) => a.position - b.position),
-        updatedAt: new Date().toISOString(),
-      });
+      await saveMyDefaultPreset({ ...sortPreset(preset), updatedAt: new Date().toISOString() });
       Alert.alert("Saved", "My Default is ready. Use “Apply My Default” on any video.");
       router.back();
     } catch (error) {
@@ -134,42 +179,44 @@ export default function MyDefaultScreen() {
   };
 
   const updateTransition = (index: number, patch: Partial<MyDefaultPreset["transitions"][number]>) =>
-    setPreset((p) =>
-      p && { ...p, transitions: p.transitions.map((t, i) => (i === index ? { ...t, ...patch } : t)) },
-    );
+    editVisible((v) => ({ ...v, transitions: v.transitions.map((t, i) => (i === index ? { ...t, ...patch } : t)) }));
 
   const updateFreeze = (index: number, patch: Partial<MyDefaultPreset["freezes"][number]>) =>
-    setPreset((p) =>
-      p && { ...p, freezes: p.freezes.map((f, i) => (i === index ? { ...f, ...patch } : f)) },
-    );
+    editVisible((v) => ({ ...v, freezes: v.freezes.map((f, i) => (i === index ? { ...f, ...patch } : f)) }));
+
+  const deleteTransition = (index: number) =>
+    editVisible((v) => ({ ...v, transitions: v.transitions.filter((_, j) => j !== index) }));
+
+  const deleteFreeze = (index: number) =>
+    editVisible((v) => ({ ...v, freezes: v.freezes.filter((_, j) => j !== index) }));
 
   const addTransition = () => {
-    if (!preset) return;
-    const at = findFreeSpot(preset, 0);
+    if (!visiblePreset) return;
+    const at = findFreeSpot(visiblePreset, length, 0);
     if (at === null) {
       Alert.alert("No room", "Drag the lines apart or make the total length longer.");
       return;
     }
-    setPreset({
-      ...preset,
-      transitions: [...preset.transitions, { position: at / reference, kind: "dissolve", duration: 0.5 }],
-    });
+    editVisible((v) => ({
+      ...v,
+      transitions: [...v.transitions, { at, kind: "fade", duration: DEFAULT_CUSTOM_TRANSITION_DURATION }],
+    }));
   };
 
   const addFreeze = () => {
-    if (!preset) return;
-    const at = findFreeSpot(preset, DEFAULT_FREEZE_DURATION);
+    if (!visiblePreset) return;
+    const at = findFreeSpot(visiblePreset, length, DEFAULT_FREEZE_DURATION);
     if (at === null) {
       Alert.alert("No room", "A 5 s freeze doesn't fit between the lines. Drag them apart or make the total length longer.");
       return;
     }
-    setPreset({
-      ...preset,
+    editVisible((v) => ({
+      ...v,
       freezes: [
-        ...preset.freezes,
-        { position: at / reference, duration: DEFAULT_FREEZE_DURATION, zoomTo: DEFAULT_FREEZE_ZOOM_TO, zoomDirection: "center" },
+        ...v.freezes,
+        { at, duration: DEFAULT_FREEZE_DURATION, zoomTo: DEFAULT_FREEZE_ZOOM_TO, zoomDirection: "center" },
       ],
-    });
+    }));
   };
 
   return (
@@ -192,33 +239,69 @@ export default function MyDefaultScreen() {
         <ActivityIndicator size="large" color={C.primary} style={{ flex: 1 }} />
       ) : (
         <ScrollView contentContainerStyle={styles.content} scrollEnabled={!isDragging}>
-          {/* Total length */}
-          <View style={styles.lengthRow}>
-            <Text style={styles.lengthLabel}>Total length</Text>
-            <TextInput
-              value={lengthText}
-              onChangeText={setLengthText}
-              onEndEditing={commitLength}
-              onSubmitEditing={commitLength}
-              keyboardType="numbers-and-punctuation"
-              returnKeyType="done"
-              style={styles.lengthInput}
-              placeholder="2:10"
-              placeholderTextColor={C.secondaryText}
+          {/* Repeat switch */}
+          <View style={styles.switchRow}>
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={styles.switchTitle}>Repeat pattern until the video ends</Text>
+              <Text style={styles.help}>
+                {preset.repeat
+                  ? "ON: the lines below are one round; it repeats every Total length."
+                  : "OFF: the lines are exact times on this video, once."}
+              </Text>
+            </View>
+            <Switch
+              value={preset.repeat}
+              onValueChange={setRepeat}
+              trackColor={{ false: C.elevated, true: C.primary }}
+              thumbColor="#fff"
             />
+          </View>
+
+          {/* Total length: editable round length (ON) or the video's real length (OFF) */}
+          <View style={styles.lengthRow}>
+            <Text style={styles.lengthLabel}>
+              {preset.repeat ? "Total length (one round)" : "Video length"}
+            </Text>
+            {preset.repeat ? (
+              <TextInput
+                value={lengthText}
+                onChangeText={setLengthText}
+                onEndEditing={commitLength}
+                onSubmitEditing={commitLength}
+                keyboardType="numbers-and-punctuation"
+                returnKeyType="done"
+                style={styles.lengthInput}
+                placeholder="0:50"
+                placeholderTextColor={C.secondaryText}
+              />
+            ) : (
+              <Text style={[styles.lengthInput, styles.lengthLocked]}>{formatClock(length)}</Text>
+            )}
             <Text style={styles.lengthHint}>min:sec</Text>
           </View>
-          <Text style={styles.help}>
-            Lay out your edit on this length. On other videos everything keeps
-            the same relative place (a line at the middle stays in the middle).
-          </Text>
 
           {/* Timeline */}
           <PresetTimeline
-            preset={preset}
-            onChange={setPreset}
+            preset={visiblePreset ?? preset}
+            length={length}
+            onChange={(next) => editVisible(() => next)}
             onDraggingChange={setIsDragging}
           />
+
+          {hiddenCount.transitions + hiddenCount.freezes > 0 && (
+            <Text style={styles.help}>
+              {[
+                hiddenCount.transitions > 0 &&
+                  `${hiddenCount.transitions} transition${hiddenCount.transitions === 1 ? "" : "s"}`,
+                hiddenCount.freezes > 0 &&
+                  `${hiddenCount.freezes} freeze${hiddenCount.freezes === 1 ? "" : "s"}`,
+              ]
+                .filter(Boolean)
+                .join(" and ")}{" "}
+              after {formatClock(length)} {hiddenCount.transitions + hiddenCount.freezes === 1 ? "is" : "are"} hidden
+              (they come back when Repeat is ON).
+            </Text>
+          )}
 
           {problems.length > 0 && (
             <View style={styles.problemBox}>
@@ -230,20 +313,32 @@ export default function MyDefaultScreen() {
             </View>
           )}
 
+          {/* Where the effects land on the current video */}
+          {effectTimes && (
+            <View style={styles.resultBox}>
+              <Text style={styles.resultTitle}>On this video ({formatClock(videoDuration)})</Text>
+              <Text style={[styles.resultText, { color: TRANSITION_COLOR }]}>
+                │ {effectTimes.transitions.length} transitions:{" "}
+                {effectTimes.transitions.slice(0, PREVIEW_TIMES).map(formatClock).join("  ")}
+                {effectTimes.transitions.length > PREVIEW_TIMES ? "  …" : ""}
+              </Text>
+              <Text style={[styles.resultText, { color: FREEZE_COLOR }]}>
+                ❄ {effectTimes.freezes.length} freezes:{" "}
+                {effectTimes.freezes.slice(0, PREVIEW_TIMES).map(formatClock).join("  ")}
+                {effectTimes.freezes.length > PREVIEW_TIMES ? "  …" : ""}
+              </Text>
+            </View>
+          )}
+
           {/* Transitions */}
-          <Text style={styles.sectionTitle}>TRANSITIONS ({preset.transitions.length})</Text>
-          {preset.transitions.map((t, i) => (
+          <Text style={styles.sectionTitle}>TRANSITIONS ({(visiblePreset ?? preset).transitions.length})</Text>
+          {(visiblePreset ?? preset).transitions.map((t, i) => (
             <View key={`tr${i}`} style={[styles.card, { borderLeftColor: TRANSITION_COLOR }]}>
               <View style={styles.cardHeader}>
                 <Text style={styles.cardTitle}>
-                  Transition {i + 1} · {formatClock(t.position * reference)}
+                  Transition {i + 1} · {formatClock(t.at)}
                 </Text>
-                <Pressable
-                  onPress={() =>
-                    setPreset((p) => p && { ...p, transitions: p.transitions.filter((_, j) => j !== i) })
-                  }
-                  hitSlop={6}
-                >
+                <Pressable onPress={() => deleteTransition(i)} hitSlop={6}>
                   <Text style={styles.deleteText}>Delete</Text>
                 </Pressable>
               </View>
@@ -253,7 +348,7 @@ export default function MyDefaultScreen() {
                 ))}
               </ChipRow>
               <ChipRow>
-                {PRESET_TRANSITION_DURATIONS.map((d) => (
+                {TRANSITION_DURATION_CHOICES.map((d) => (
                   <Chip key={d} label={`${d}s`} selected={t.duration === d} onPress={() => updateTransition(i, { duration: d })} />
                 ))}
               </ChipRow>
@@ -262,24 +357,18 @@ export default function MyDefaultScreen() {
           <AddButton label="+ Add transition" onPress={addTransition} />
 
           {/* Freezes */}
-          <Text style={styles.sectionTitle}>FREEZE FRAMES ({preset.freezes.length})</Text>
+          <Text style={styles.sectionTitle}>FREEZE FRAMES ({(visiblePreset ?? preset).freezes.length})</Text>
           <Text style={styles.help}>
             Each freeze replaces that part of the video with a zooming still;
             the audio keeps playing.
           </Text>
-          {preset.freezes.map((f, i) => (
+          {(visiblePreset ?? preset).freezes.map((f, i) => (
             <View key={`fr${i}`} style={[styles.card, { borderLeftColor: FREEZE_COLOR }]}>
               <View style={styles.cardHeader}>
                 <Text style={styles.cardTitle}>
-                  Freeze {i + 1} · {formatClock(f.position * reference)}–
-                  {formatClock(f.position * reference + f.duration)}
+                  Freeze {i + 1} · {formatClock(f.at)}–{formatClock(f.at + f.duration)}
                 </Text>
-                <Pressable
-                  onPress={() =>
-                    setPreset((p) => p && { ...p, freezes: p.freezes.filter((_, j) => j !== i) })
-                  }
-                  hitSlop={6}
-                >
+                <Pressable onPress={() => deleteFreeze(i)} hitSlop={6}>
                   <Text style={styles.deleteText}>Delete</Text>
                 </Pressable>
               </View>
@@ -315,7 +404,7 @@ export default function MyDefaultScreen() {
                   onPress: () => {
                     const starter = createStarterPreset();
                     setPreset(starter);
-                    setLengthText(formatClock(referenceDuration(starter)));
+                    setLengthText(formatClock(starter.patternLength));
                   },
                 },
               ])
@@ -331,21 +420,22 @@ export default function MyDefaultScreen() {
 }
 
 // ---------------------------------------------------------------------------
-// Timeline with draggable lines
+// Timeline with freely draggable lines
 // ---------------------------------------------------------------------------
 
 function PresetTimeline({
   preset,
+  length,
   onChange,
   onDraggingChange,
 }: {
   preset: MyDefaultPreset;
+  length: number;
   onChange: (preset: MyDefaultPreset) => void;
   onDraggingChange: (dragging: boolean) => void;
 }) {
   const [width, setWidth] = useState(0);
-  const reference = referenceDuration(preset);
-  const toX = (seconds: number) => (seconds / reference) * width;
+  const toX = (seconds: number) => (seconds / length) * width;
 
   // Labels: stagger to a second row when two of the same colour are close.
   const labelRows = (items: { key: string; x: number }[]) => {
@@ -363,41 +453,33 @@ function PresetTimeline({
     return rows;
   };
 
-  const transitionItems = preset.transitions.map((t, i) => ({ key: `t${i}`, x: toX(t.position * reference) }));
-  const freezeItems = preset.freezes.map((f, i) => ({ key: `f${i}`, x: toX(f.position * reference) }));
+  const transitionItems = preset.transitions.map((t, i) => ({ key: `t${i}`, x: toX(t.at) }));
+  const freezeItems = preset.freezes.map((f, i) => ({ key: `f${i}`, x: toX(f.at) }));
   const transitionRows = labelRows(transitionItems);
   const freezeRows = labelRows(freezeItems);
 
-  // Free drag: follow the finger (even over other lines). On release, settle
-  // on the nearest free spot (or go back if there is none) and renumber.
+  // Free drag; on release settle on the nearest free spot and renumber.
   const beforeDragRef = useRef<MyDefaultPreset | null>(null);
   const dragStart = () => {
     beforeDragRef.current = preset;
   };
-  const drag = (ref: MarkerRef, seconds: number) => onChange(dragMarker(preset, ref, seconds));
+  const drag = (ref: MarkerRef, seconds: number) => onChange(dragMarker(preset, length, ref, seconds));
   const dragEnd = (ref: MarkerRef) => {
     const fallback = beforeDragRef.current ?? preset;
-    onChange(sortPreset(settleMarker(preset, ref, fallback)));
+    onChange(sortPreset(settleMarker(preset, length, ref, fallback)));
     beforeDragRef.current = null;
   };
   const lineColor = (ref: MarkerRef, normal: string) =>
-    isMarkerOverlapping(preset, ref) ? BLOCKED_COLOR : normal;
+    isMarkerOverlapping(preset, length, ref) ? BLOCKED_COLOR : normal;
 
   return (
     <View>
-      <View
-        style={styles.timeline}
-        onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
-      >
-        {/* Freeze bands (how long each freeze lasts) */}
+      <View style={styles.timeline} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
         {preset.freezes.map((f, i) => (
           <View
             key={`band${i}`}
             pointerEvents="none"
-            style={[
-              styles.freezeBand,
-              { left: toX(f.position * reference), width: Math.max(2, toX(f.duration)) },
-            ]}
+            style={[styles.freezeBand, { left: toX(f.at), width: Math.max(2, toX(f.duration)) }]}
           />
         ))}
 
@@ -406,9 +488,9 @@ function PresetTimeline({
             <DraggableLine
               key={`tl${i}`}
               markerRef={{ type: "transition", index: i }}
-              seconds={t.position * reference}
-              x={toX(t.position * reference)}
-              secondsPerPixel={reference / width}
+              seconds={t.at}
+              x={toX(t.at)}
+              secondsPerPixel={length / width}
               color={lineColor({ type: "transition", index: i }, TRANSITION_COLOR)}
               onDragStart={dragStart}
               onDrag={drag}
@@ -422,9 +504,9 @@ function PresetTimeline({
             <DraggableLine
               key={`fl${i}`}
               markerRef={{ type: "freeze", index: i }}
-              seconds={f.position * reference}
-              x={toX(f.position * reference)}
-              secondsPerPixel={reference / width}
+              seconds={f.at}
+              x={toX(f.at)}
+              secondsPerPixel={length / width}
               color={lineColor({ type: "freeze", index: i }, FREEZE_COLOR)}
               onDragStart={dragStart}
               onDrag={drag}
@@ -441,14 +523,10 @@ function PresetTimeline({
             key={`tlabel${i}`}
             style={[
               styles.timeLabel,
-              {
-                color: TRANSITION_COLOR,
-                left: transitionItems[i].x - LABEL_WIDTH / 2,
-                top: transitionRows[`t${i}`] * 16,
-              },
+              { color: TRANSITION_COLOR, left: transitionItems[i].x - LABEL_WIDTH / 2, top: transitionRows[`t${i}`] * 16 },
             ]}
           >
-            {formatClock(t.position * reference)}
+            {formatClock(t.at)}
           </Text>
         ))}
         {preset.freezes.map((f, i) => (
@@ -456,14 +534,10 @@ function PresetTimeline({
             key={`flabel${i}`}
             style={[
               styles.timeLabel,
-              {
-                color: FREEZE_COLOR,
-                left: freezeItems[i].x - LABEL_WIDTH / 2,
-                top: 34 + freezeRows[`f${i}`] * 16,
-              },
+              { color: FREEZE_COLOR, left: freezeItems[i].x - LABEL_WIDTH / 2, top: 34 + freezeRows[`f${i}`] * 16 },
             ]}
           >
-            ❄ {formatClock(f.position * reference)}
+            ❄ {formatClock(f.at)}
           </Text>
         ))}
       </View>
@@ -472,7 +546,7 @@ function PresetTimeline({
         <Text style={[styles.legend, { color: TRANSITION_COLOR }]}>│ transition</Text>
         <Text style={[styles.legend, { color: FREEZE_COLOR }]}>│ freeze</Text>
         <Text style={styles.legend}>drag the lines</Text>
-        <Text style={styles.legend}>{formatClock(reference)}</Text>
+        <Text style={styles.legend}>{formatClock(length)}</Text>
       </View>
     </View>
   );
@@ -540,11 +614,7 @@ function DraggableLine({
   );
 
   return (
-    <View
-      {...responder.panHandlers}
-      hitSlop={{ top: 8, bottom: 8 }}
-      style={[styles.lineTouch, { left: x - 16 }]}
-    >
+    <View {...responder.panHandlers} hitSlop={{ top: 8, bottom: 8 }} style={[styles.lineTouch, { left: x - 16 }]}>
       <View style={[styles.line, { backgroundColor: color, width: isActive ? 5 : 3 }]} />
       <View style={[styles.lineKnob, { backgroundColor: color, transform: [{ scale: isActive ? 1.3 : 1 }] }]} />
     </View>
@@ -604,6 +674,17 @@ const styles = StyleSheet.create({
   saveText: { color: C.primaryLight, fontSize: 16, fontWeight: "700" },
   content: { padding: 16, gap: 12, paddingBottom: 40 },
   help: { color: C.secondaryText, fontSize: 12 },
+  switchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: C.card,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: 12,
+  },
+  switchTitle: { color: C.text, fontSize: 15, fontWeight: "700" },
   lengthRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   lengthLabel: { color: C.text, fontSize: 15, fontWeight: "700", flex: 1 },
   lengthInput: {
@@ -619,58 +700,30 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     textAlign: "center",
   },
+  lengthLocked: { color: C.secondaryText, opacity: 0.7 },
   lengthHint: { color: C.secondaryText, fontSize: 12 },
-  timeline: {
-    height: 56,
-    borderRadius: 8,
-    backgroundColor: C.elevated,
-    marginTop: 6,
-  },
-  freezeBand: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    backgroundColor: "rgba(245,158,11,0.22)",
-  },
-  lineTouch: {
-    position: "absolute",
-    top: -6,
-    bottom: -6,
-    width: 32,
-    alignItems: "center",
-  },
+  timeline: { height: 56, borderRadius: 8, backgroundColor: C.elevated, marginTop: 6 },
+  freezeBand: { position: "absolute", top: 0, bottom: 0, backgroundColor: "rgba(245,158,11,0.22)" },
+  lineTouch: { position: "absolute", top: -6, bottom: -6, width: 32, alignItems: "center" },
   line: { flex: 1, borderRadius: 2 },
-  lineKnob: {
-    position: "absolute",
-    top: -2,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-  },
+  lineKnob: { position: "absolute", top: -2, width: 14, height: 14, borderRadius: 7 },
   labelArea: { height: 68, marginTop: 4 },
-  timeLabel: {
-    position: "absolute",
-    width: LABEL_WIDTH,
-    textAlign: "center",
-    fontSize: 11,
-    fontWeight: "700",
-  },
+  timeLabel: { position: "absolute", width: LABEL_WIDTH, textAlign: "center", fontSize: 11, fontWeight: "700" },
   legendRow: { flexDirection: "row", justifyContent: "space-between" },
   legend: { color: C.secondaryText, fontSize: 11 },
-  problemBox: {
+  problemBox: { borderRadius: 10, padding: 10, backgroundColor: "rgba(239,68,68,0.12)", gap: 4 },
+  problemText: { color: C.danger, fontSize: 12 },
+  resultBox: {
     borderRadius: 10,
     padding: 10,
-    backgroundColor: "rgba(239,68,68,0.12)",
+    backgroundColor: C.card,
+    borderWidth: 1,
+    borderColor: C.border,
     gap: 4,
   },
-  problemText: { color: C.danger, fontSize: 12 },
-  sectionTitle: {
-    color: C.secondaryText,
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 1,
-    marginTop: 8,
-  },
+  resultTitle: { color: C.text, fontSize: 13, fontWeight: "700" },
+  resultText: { fontSize: 12 },
+  sectionTitle: { color: C.secondaryText, fontSize: 12, fontWeight: "700", letterSpacing: 1, marginTop: 8 },
   card: {
     backgroundColor: C.card,
     borderRadius: 12,

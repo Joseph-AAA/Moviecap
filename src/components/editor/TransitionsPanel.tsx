@@ -3,26 +3,17 @@ import { Alert, Modal, Pressable, Text, View } from "react-native";
 
 import { MovieCapColors as C } from "@/constants/theme";
 import {
-  CUSTOM_TRANSITION_DURATIONS,
-  DEFAULT_TRANSITION_DURATION,
   cutPlacementProblem,
   listTransitionSlots,
   type TransitionSlot,
 } from "@/services/timeline/editTimeline";
+import {
+  DEFAULT_CUSTOM_TRANSITION_DURATION,
+  TRANSITION_DURATION_CHOICES,
+  TRANSITION_LABEL as KIND_LABEL,
+  TRANSITION_OPTIONS as KINDS,
+} from "@/constants/transitions";
 import type { EditConfig, TransitionKind } from "@/types/edit";
-
-const KINDS: { kind: TransitionKind; label: string }[] = [
-  { kind: "dissolve", label: "Dissolve" },
-  { kind: "fade", label: "Crossfade" },
-  { kind: "fadeblack", label: "Fade to black" },
-  { kind: "slideleft", label: "Slide left" },
-  { kind: "slideright", label: "Slide right" },
-];
-
-const KIND_LABEL = Object.fromEntries(KINDS.map((k) => [k.kind, k.label])) as Record<
-  TransitionKind,
-  string
->;
 
 const SOURCE_LABEL: Record<TransitionSlot["source"], string> = {
   custom: "Custom",
@@ -42,8 +33,11 @@ interface TransitionsPanelProps {
   isBusy: boolean;
   /** Current playhead time (read when "Add at playhead" is pressed). */
   getPlayheadTime: () => number;
-  /** Seek the preview to just before a cut so the user can watch it. */
-  onPreviewCut: (at: number) => void;
+  /**
+   * Preview a transition exactly as it will be exported. `kind`/`duration`
+   * may be unsaved choices from the editor sheet.
+   */
+  onPreviewTransition: (at: number, kind: TransitionKind, duration: number) => void;
   onSave: (at: number, kind: TransitionKind, duration: number) => void;
   onRemoveCustom: (at: number) => void;
 }
@@ -64,7 +58,7 @@ export default function TransitionsPanel({
   config,
   isBusy,
   getPlayheadTime,
-  onPreviewCut,
+  onPreviewTransition,
   onSave,
   onRemoveCustom,
 }: TransitionsPanelProps) {
@@ -75,7 +69,7 @@ export default function TransitionsPanel({
     setDraft({
       at: slot.at,
       kind: slot.effective?.kind ?? "dissolve",
-      duration: slot.effective?.duration ?? DEFAULT_TRANSITION_DURATION,
+      duration: slot.effective?.duration ?? DEFAULT_CUSTOM_TRANSITION_DURATION,
       slot,
     });
 
@@ -93,7 +87,7 @@ export default function TransitionsPanel({
       return;
     }
 
-    setDraft({ at, kind: "dissolve", duration: DEFAULT_TRANSITION_DURATION, slot: null });
+    setDraft({ at, kind: "fade", duration: DEFAULT_CUSTOM_TRANSITION_DURATION, slot: null });
   };
 
   const save = () => {
@@ -166,7 +160,29 @@ export default function TransitionsPanel({
                 {SOURCE_LABEL[slot.source]}
               </Text>
             </View>
-            <Text style={{ color: C.secondaryText, fontSize: 18 }}>›</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+              {slot.effective && (
+                <Pressable
+                  onPress={() =>
+                    onPreviewTransition(slot.at, slot.effective!.kind, slot.effective!.duration)
+                  }
+                  disabled={isBusy}
+                  hitSlop={8}
+                  accessibilityLabel="Preview this transition"
+                  style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 17,
+                    backgroundColor: C.primary,
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <Text style={{ color: "#fff", fontSize: 12 }}>▶</Text>
+                </Pressable>
+              )}
+              <Text style={{ color: C.secondaryText, fontSize: 18 }}>›</Text>
+            </View>
           </Pressable>
         ))
       )}
@@ -240,7 +256,7 @@ export default function TransitionsPanel({
                 DURATION
               </Text>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                {CUSTOM_TRANSITION_DURATIONS.map((duration) => (
+                {TRANSITION_DURATION_CHOICES.map((duration) => (
                   <Chip
                     key={duration}
                     label={`${duration}s`}
@@ -250,19 +266,15 @@ export default function TransitionsPanel({
                 ))}
               </View>
 
-              {draft.slot && (
-                <Pressable
-                  onPress={() => {
-                    onPreviewCut(draft.at);
-                    setDraft(null);
-                  }}
-                  hitSlop={6}
-                >
-                  <Text style={{ color: C.primaryLight, fontSize: 13 }}>
-                    ▶ Watch this cut in the preview
-                  </Text>
-                </Pressable>
-              )}
+              {/* Try the CURRENT choice before saving it. */}
+              <Pressable
+                onPress={() => onPreviewTransition(draft.at, draft.kind, draft.duration)}
+                hitSlop={6}
+              >
+                <Text style={{ color: C.primaryLight, fontSize: 13 }}>
+                  ▶ Preview this transition
+                </Text>
+              </Pressable>
 
               <View style={{ flexDirection: "row", gap: 10, marginTop: 4 }}>
                 {isCustom && (

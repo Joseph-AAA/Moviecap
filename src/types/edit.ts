@@ -18,11 +18,16 @@ export type EffectOrigin = "default" | "custom";
 
 /** Subtle transitions supported by the FFmpeg `xfade` filter we ship. */
 export type TransitionKind =
-  | "dissolve"
-  | "fade"
+  | "dissolve" // random-pixel dissolve (FFmpeg xfade "dissolve")
+  | "fade" // smooth crossfade
   | "fadeblack"
   | "slideleft"
-  | "slideright";
+  | "slideright"
+  | "wipe" // image wipe
+  | "checkerboard" // custom expression
+  | "snowdrift" // custom expression
+  | "pixelize" // "Reconfigure pixel"
+  | "elastic"; // "Elastic wrap" (squeeze)
 
 /** A contiguous, in-order piece of the source video. */
 export interface Segment {
@@ -167,23 +172,27 @@ export interface Timeline {
 
 /**
  * The user's own reusable default ("My Default"), stored once for the whole
- * app. Positions are FRACTIONS of the video length (0.25 = 25%), so the same
- * preset fits videos of any length.
+ * app. Positions are SECONDS.
+ *
+ * - repeat ON: the lines describe ONE ROUND of `patternLength` seconds, and
+ *   the round repeats until the video ends (0:05, 0:10, 0:15 in a 0:50
+ *   round -> 0:05 0:10 0:15 | 0:55 1:00 1:05 | ...).
+ * - repeat OFF: the lines are exact times on the video, applied once; lines
+ *   after the end of a shorter video are skipped.
  */
 export interface MyDefaultPreset {
-  version: 1;
-  /**
-   * The total length (seconds) the user laid the preset out on, e.g. 130
-   * for 2:10. Only for display; positions below are fractions of it.
-   */
-  referenceDuration?: number;
+  version: 2;
+  repeat: boolean;
+  /** Length of one round (seconds). Used when `repeat` is on. */
+  patternLength: number;
   transitions: {
-    position: number;
+    /** Seconds from the start of the round (repeat) or of the video. */
+    at: number;
     kind: TransitionKind;
     duration: number;
   }[];
   freezes: {
-    position: number;
+    at: number;
     duration: number;
     zoomTo: number;
     zoomDirection: ZoomDirection;

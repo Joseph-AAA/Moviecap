@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useRef, useState, type ComponentRef } from "react";
 import { Image, Pressable, Text, View } from "react-native";
 
 import { MovieCapColors as C } from "@/constants/theme";
 import type { VideoProject } from "@/types/project";
-import ProjectMenu from "./ProjectMenu";
+import ProjectMenu, { type MenuAnchor } from "./ProjectMenu";
 
 interface ProjectCardProps {
   project: VideoProject;
@@ -18,7 +18,16 @@ export default function ProjectCard({
   onRename,
   onDelete,
 }: ProjectCardProps) {
-  const [menuVisible, setMenuVisible] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<MenuAnchor | null>(null);
+  const dotsRef = useRef<ComponentRef<typeof View>>(null);
+
+  // Open the popup right next to the ⋮ button.
+  const openMenu = () => {
+    dotsRef.current?.measureInWindow((x, y, width, height) =>
+      setMenuAnchor({ x, y, width, height }),
+    );
+  };
+  const closeMenu = () => setMenuAnchor(null);
 
   const formatDuration = (milliseconds: number) => {
     const totalSeconds = Math.floor(milliseconds / 1000);
@@ -33,22 +42,17 @@ export default function ProjectCard({
   };
 
   const handleRename = () => {
-    setMenuVisible(false);
+    closeMenu();
     onRename(project);
   };
 
   const handleDelete = () => {
-    setMenuVisible(false);
+    closeMenu();
     onDelete(project);
   };
 
   return (
-    <View
-      style={{
-        position: "relative",
-        zIndex: menuVisible ? 10 : 0,
-      }}
-    >
+    <View>
       <Pressable
         style={{
           flexDirection: "row",
@@ -115,7 +119,8 @@ export default function ProjectCard({
         </View>
 
         <Pressable
-          onPress={() => setMenuVisible((visible) => !visible)}
+          ref={dotsRef}
+          onPress={openMenu}
           hitSlop={8}
           style={{
             width: 32,
@@ -137,9 +142,11 @@ export default function ProjectCard({
       </Pressable>
 
       <ProjectMenu
-        visible={menuVisible}
+        visible={menuAnchor !== null}
+        anchor={menuAnchor}
         onRename={handleRename}
         onDelete={handleDelete}
+        onClose={closeMenu}
       />
     </View>
   );

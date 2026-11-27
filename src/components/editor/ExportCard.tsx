@@ -23,6 +23,10 @@ interface ExportCardProps {
   range: { start: number; end: number };
   videoDuration: number;
   onExported?: () => void;
+  /** Called right before exporting (e.g. to pause the background preview). */
+  onExportStart?: () => void;
+  /** Called when exporting ends, whatever the result. */
+  onExportEnd?: () => void;
 }
 
 const MIN_EXPORT_SECONDS = 0.5;
@@ -42,6 +46,8 @@ export default function ExportCard({
   range,
   videoDuration,
   onExported,
+  onExportStart,
+  onExportEnd,
 }: ExportCardProps) {
   const [progress, setProgress] = useState<number | null>(null);
   const [isTrimming, setIsTrimming] = useState(false);
@@ -125,7 +131,8 @@ export default function ExportCard({
       );
       return;
     }
-    void (withEffects ? exportWithEffects() : exportQuick());
+    onExportStart?.();
+    void (withEffects ? exportWithEffects() : exportQuick()).finally(() => onExportEnd?.());
   };
 
   return (

@@ -3,12 +3,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { EditConfig, TransitionEffect } from "../../types/edit.ts";
+import type { EditConfig, MyDefaultPreset, TransitionEffect } from "../../types/edit.ts";
 import {
-  DEFAULT_FREEZE_DURATION,
-  DEFAULT_SEGMENT_DURATIONS,
-  FREEZE_EDGE_MARGIN,
-  MIN_FINAL_SEGMENT,
+  ALL_TRANSITION_KINDS,
+  DEFAULT_RULES,
   applyDefaultEdit,
   applyMyDefault,
   buildTimeline,
@@ -19,13 +17,11 @@ import {
   presetFromConfig,
   resolveFreezes,
   createEmptyEditConfig,
-  createRandom,
   cutPlacementProblem,
   listTransitionSlots,
   removeCustomTransition,
   setCustomTransition,
   generateDefaultEdit,
-  generateSegments,
   mapSourceToOutput,
   parseEditConfig,
   resolveTransitions,
@@ -33,106 +29,80 @@ import {
 } from "./editTimeline.ts";
 
 const NOW = new Date("2026-11-27T00:00:00.000Z");
-const ALLOWED = new Set<number>(DEFAULT_SEGMENT_DURATIONS);
 
 function config(duration: number): EditConfig {
   return createEmptyEditConfig("file:///video.mp4", duration, NOW);
 }
 
-describe("generateSegments", () => {
-  it("covers the whole video contiguously, in order, for many seeds and lengths", () => {
-    for (const duration of [0.8, 7, 15, 19.5, 23, 48, 61.3, 125, 600, 5400]) {
-      for (let seed = 1; seed <= 50; seed++) {
-        const segments = generateSegments(duration, createRandom(seed), seed);
+describe("Apply Default rules (every 6 s under 1 min, every 15 s from 1 min)", () => {
+  /** All effect times (transitions and freezes), in order. */
+  const effectTimes = (duration: number, seed: number) => {
+    const edit = generateDefaultEdit(duration, seed, NOW);
+    return [...edit.transitions.map((t) => t.at), ...edit.freezes.map((f) => f.sourceTime)].sort((a, b) => a - b);
+  };
 
-        assert.equal(segments[0].start, 0);
-        assert.equal(segments.at(-1)!.end, Math.round(duration * 1000) / 1000);
-
-        segments.forEach((segment, i) => {
-          assert.ok(segment.end > segment.start, "no empty segment");
-          if (i > 0) assert.equal(segment.start, segments[i - 1].end, "contiguous");
-        });
-
-        // Every segment except the last uses one of the allowed durations.
-        segments.slice(0, -1).forEach((segment) => {
-          assert.ok(ALLOWED.has(Math.round(segment.end - segment.start)));
-        });
-
-        // The last piece is never tiny unless the whole video is tiny.
-        if (segments.length > 1) {
-          const last = segments.at(-1)!;
-          assert.ok(last.end - last.start >= MIN_FINAL_SEGMENT);
-        }
-      }
+  it("30 s video: an effect at 0:06, 0:12, 0:18, 0:24 — each a transition or a 3 s freeze", () => {
+    for (let seed = 1; seed <= 50; seed++) {
+      assert.deepEqual(effectTimes(30, seed), [6, 12, 18, 24]);
+      const edit = generateDefaultEdit(30, seed, NOW);
+      edit.freezes.forEach((f) => {
+        assert.equal(f.duration, 3);
+        assert.ok(f.zoomTo > f.zoomFrom, "freezes always zoom in");
+      });
+      edit.transitions.forEach((t) => {
+        assert.ok(ALL_TRANSITION_KINDS.includes(t.kind));
+        assert.ok((DEFAULT_RULES.short.transitionSeconds as readonly number[]).includes(t.duration));
+      });
     }
   });
 
-  it("uses different durations across seeds (it is actually random)", () => {
-    const firstDurations = new Set<number>();
-    for (let seed = 1; seed <= 40; seed++) {
-      const [first] = generateSegments(600, createRandom(seed), seed);
-      firstDurations.add(first.end - first.start);
+  it("2:00 video: an effect every 15 s; 5 s freezes; 5/7/8 s transitions", () => {
+    for (let seed = 1; seed <= 50; seed++) {
+      assert.deepEqual(effectTimes(120, seed), [15, 30, 45, 60, 75, 90, 105]);
+      const edit = generateDefaultEdit(120, seed, NOW);
+      edit.freezes.forEach((f) => assert.equal(f.duration, 5));
+      edit.transitions.forEach((t) =>
+        assert.ok((DEFAULT_RULES.long.transitionSeconds as readonly number[]).includes(t.duration)),
+      );
     }
-    assert.ok(firstDurations.size >= 3);
-  });
-});
-
-describe("generateDefaultEdit", () => {
-  it("is reproducible from its seed", () => {
-    assert.deepEqual(
-      generateDefaultEdit(300, 1234, NOW),
-      generateDefaultEdit(300, 1234, NOW),
-    );
   });
 
-  it("puts one subtle transition at every segment boundary", () => {
-    const edit = generateDefaultEdit(300, 99, NOW);
-    assert.equal(edit.transitions.length, edit.segments.length - 1);
-    edit.transitions.forEach((t, i) => {
-      assert.equal(t.at, edit.segments[i + 1].start);
-      assert.equal(t.kind, "dissolve");
-      assert.ok(t.duration > 0 && t.duration <= 0.5);
-    });
+  it("50–59 s and under 20 s use the 6-second rule; exactly 1:00 uses the 15-second rule", () => {
+    assert.deepEqual(effectTimes(55, 1), [6, 12, 18, 24, 30, 36, 42, 48, 54]);
+    assert.deepEqual(effectTimes(12, 1), [6]);
+    assert.deepEqual(effectTimes(60, 1), [15, 30, 45]);
   });
 
-  it("creates 2 or 3 five-second zoom freezes that never contain a cut or overlap", () => {
-    const counts = new Set<number>();
-    for (const duration of [48, 120, 300, 1800]) {
-      for (let seed = 1; seed <= 60; seed++) {
-        const edit = generateDefaultEdit(duration, seed, NOW);
-        const cuts = edit.segments.slice(1).map((s) => s.start);
-        if (duration >= 120) counts.add(edit.freezes.length);
-
-        edit.freezes.forEach((freeze, i) => {
-          const end = freeze.sourceTime + freeze.duration;
-          assert.equal(freeze.duration, DEFAULT_FREEZE_DURATION);
-          assert.ok(freeze.zoomTo > freeze.zoomFrom && freeze.zoomTo <= 1.3);
-          assert.ok(freeze.sourceTime >= FREEZE_EDGE_MARGIN);
-          assert.ok(end <= duration - FREEZE_EDGE_MARGIN);
-          for (const cut of cuts) {
-            assert.ok(
-              cut <= freeze.sourceTime - FREEZE_EDGE_MARGIN + 0.001 || cut >= end + FREEZE_EDGE_MARGIN - 0.001,
-              `cut ${cut} too close to freeze ${freeze.sourceTime}-${end} (seed ${seed}, ${duration}s)`,
-            );
-          }
-          if (i > 0) {
-            const prev = edit.freezes[i - 1];
-            assert.ok(freeze.sourceTime >= prev.sourceTime + prev.duration, "no overlap");
-          }
-        });
-      }
+  it("is really random: both effect types and many transition types appear", () => {
+    const kinds = new Set<string>();
+    let freezes = 0;
+    let transitions = 0;
+    for (let seed = 1; seed <= 60; seed++) {
+      const edit = generateDefaultEdit(300, seed, NOW);
+      freezes += edit.freezes.length;
+      transitions += edit.transitions.length;
+      edit.transitions.forEach((t) => kinds.add(t.kind));
     }
-    assert.deepEqual([...counts].sort(), [2, 3]);
+    assert.ok(freezes > 100 && transitions > 100);
+    assert.ok(kinds.size >= 8);
   });
 
-  it("still fits freezes into a short 48 s video like the user's", () => {
+  it("a freeze that wouldn't fit before the end becomes a transition", () => {
     for (let seed = 1; seed <= 30; seed++) {
-      assert.ok(generateDefaultEdit(48, seed, NOW).freezes.length >= 1);
+      const edit = generateDefaultEdit(26, seed, NOW); // 0:24 + 3 s > 25.5
+      assert.ok(edit.freezes.every((f) => f.sourceTime + f.duration <= 25.5));
+      assert.ok(edit.transitions.some((t) => t.at === 24));
     }
   });
 
-  it("adds no freezes to a video too short for them", () => {
-    assert.equal(generateDefaultEdit(3, 7, NOW).freezes.length, 0);
+  it("segments cover the whole video and the edit is reproducible from its seed", () => {
+    const edit = generateDefaultEdit(300, 1234, NOW);
+    assert.equal(edit.segments[0].start, 0);
+    assert.equal(edit.segments.at(-1)!.end, 300);
+    edit.segments.forEach((seg, i) => {
+      if (i > 0) assert.equal(seg.start, edit.segments[i - 1].end);
+    });
+    assert.deepEqual(generateDefaultEdit(300, 1234, NOW), edit);
   });
 });
 
@@ -258,7 +228,7 @@ describe("buildTimeline", () => {
     const base = config(10);
     const long: TransitionEffect = { id: "t", origin: "custom", at: 1, kind: "dissolve", duration: 3 };
     const timeline = buildTimeline({ ...base, custom: { ...base.custom, transitions: [long] } });
-    assert.equal(timeline.cuts[0].transition!.duration, 0.5); // half of the 1 s first clip
+    assert.equal(timeline.cuts[0].transition!.duration, 1); // the 1 s first clip is the limit
   });
 });
 
@@ -298,7 +268,7 @@ describe("custom transitions (Phase 8)", () => {
     const reset = removeCustomTransition(custom, cut, NOW);
     const back = listTransitionSlots(reset).find((s) => s.at === cut)!;
     assert.equal(back.source, "default");
-    assert.equal(back.effective?.kind, "dissolve");
+    assert.equal(back.effective?.kind, applied.defaultEdit!.transitions[0].kind);
   });
 
   it("setting twice at the same cut replaces instead of stacking", () => {
@@ -333,51 +303,89 @@ describe("custom transitions (Phase 8)", () => {
   });
 });
 
-describe("My Default preset", () => {
-  it("places transitions and freezes by percent on videos of any length", () => {
-    const preset = createStarterPreset(NOW); // cuts 25/50/75%, freezes 15%, 60%
-    for (const duration of [40, 120, 3600]) {
-      const edit = generateFromPreset(duration, preset, NOW);
-      assert.equal(edit.source, "mine");
-      assert.deepEqual(edit.transitions.map((t) => t.at), [0.25, 0.5, 0.75].map((p) => p * duration));
-      assert.deepEqual(edit.freezes.map((f) => f.sourceTime), [0.15, 0.6].map((p) => p * duration));
-      // Segments still cover the whole video contiguously.
-      assert.equal(edit.segments[0].start, 0);
-      assert.equal(edit.segments.at(-1)!.end, duration);
-    }
+describe("My Default preset (seconds; repeat or exact)", () => {
+  const pattern = (overrides: Partial<MyDefaultPreset> = {}): MyDefaultPreset => ({
+    version: 2,
+    repeat: true,
+    patternLength: 50,
+    transitions: [
+      { at: 5, kind: "fade", duration: 3 },
+      { at: 10, kind: "checkerboard", duration: 4 },
+      { at: 15, kind: "snowdrift", duration: 5 },
+    ],
+    freezes: [],
+    updatedAt: NOW.toISOString(),
+    ...overrides,
+  });
+  const times = (duration: number, p: MyDefaultPreset) =>
+    generateFromPreset(duration, p, NOW).transitions.map((t) => t.at);
+
+  it("repeat ON: the user's example — 0:50 round, effects at 5/10/15 repeat every 50 s", () => {
+    assert.deepEqual(times(160, pattern()), [5, 10, 15, 55, 60, 65, 105, 110, 115, 155]);
+    // Each repeat keeps its own type and length.
+    const kinds = generateFromPreset(160, pattern(), NOW).transitions.map((t) => t.kind);
+    assert.deepEqual(kinds.slice(0, 6), ["fade", "checkerboard", "snowdrift", "fade", "checkerboard", "snowdrift"]);
   });
 
-  it("clamps a freeze near the end so it finishes inside the video", () => {
-    const preset = { ...createStarterPreset(NOW), freezes: [{ position: 0.99, duration: 5, zoomTo: 1.2, zoomDirection: "center" as const }] };
-    const [freeze] = generateFromPreset(20, preset, NOW).freezes;
-    assert.equal(freeze.sourceTime + freeze.duration, 20);
+  it("repeat ON: a video shorter than one round only gets the lines that fit", () => {
+    assert.deepEqual(times(12, pattern()), [5, 10]);
   });
 
-  it("is Unapply-able like the standard default and keeps custom transitions", () => {
-    const withCustom = setCustomTransition(config(100), 10, "fade", 0.4, NOW);
-    const applied = applyMyDefault(withCustom, createStarterPreset(NOW), NOW);
+  it("repeat OFF: exact times once, lines after the end skipped", () => {
+    assert.deepEqual(times(160, pattern({ repeat: false })), [5, 10, 15]);
+    assert.deepEqual(times(8, pattern({ repeat: false })), [5]);
+  });
+
+  it("freezes repeat too and a freeze running past the end is shortened", () => {
+    const withFreeze = pattern({ transitions: [], freezes: [{ at: 20, duration: 5, zoomTo: 1.2, zoomDirection: "center" }] });
+    const freezes = generateFromPreset(122, withFreeze, NOW).freezes;
+    assert.deepEqual(freezes.map((f) => f.sourceTime), [20, 70, 120]);
+    assert.equal(freezes.at(-1)!.duration, 2); // 120 + 5 would pass 122
+  });
+
+  it("segments always cover the whole video, and Unapply keeps custom transitions", () => {
+    const edit = generateFromPreset(160, pattern(), NOW);
+    assert.equal(edit.segments[0].start, 0);
+    assert.equal(edit.segments.at(-1)!.end, 160);
+
+    const withCustom = setCustomTransition(config(160), 30, "fade", 3, NOW);
+    const applied = applyMyDefault(withCustom, pattern(), NOW);
     assert.equal(applied.defaultEdit!.source, "mine");
-    const removed = unapplyDefaultEdit(applied, NOW);
-    assert.equal(removed.defaultEdit, null);
-    assert.deepEqual(removed.custom.transitions, withCustom.custom.transitions);
+    assert.deepEqual(unapplyDefaultEdit(applied, NOW).custom.transitions, withCustom.custom.transitions);
   });
 
-  it("round-trips: save this edit as My Default, apply to a 2x longer video", () => {
-    const base = setCustomTransition(applyDefaultEdit(config(60), { seed: 4, now: NOW }), 50, "slideleft", 0.8, NOW);
+  it("starter preset repeats and fits its own round", () => {
+    const starter = createStarterPreset(NOW);
+    assert.equal(starter.version, 2);
+    assert.equal(starter.repeat, true);
+    assert.ok(starter.transitions.every((t) => t.at > 0 && t.at < starter.patternLength));
+  });
+
+  it("save this edit as My Default: exact seconds, repeat off", () => {
+    const base = setCustomTransition(applyDefaultEdit(config(60), { seed: 4, now: NOW }), 50, "slideleft", 3, NOW);
     const preset = presetFromConfig(base, NOW);
-    assert.ok(preset.transitions.some((t) => t.kind === "slideleft" && Math.abs(t.position - 50 / 60) < 0.001));
-    assert.ok(preset.transitions.every((t) => t.position > 0 && t.position < 1));
-
-    const longer = applyMyDefault(config(120), preset, NOW);
-    assert.ok(longer.defaultEdit!.transitions.some((t) => t.kind === "slideleft" && Math.abs(t.at - 100) < 0.2));
-    assert.equal(longer.defaultEdit!.freezes.length, resolveFreezes(base).length);
+    assert.equal(preset.repeat, false);
+    assert.equal(preset.patternLength, 60);
+    assert.ok(preset.transitions.some((t) => t.kind === "slideleft" && t.at === 50));
+    assert.equal(preset.freezes.length, resolveFreezes(base).length);
   });
 
-  it("parses stored presets safely", () => {
-    const preset = createStarterPreset(NOW);
-    assert.deepEqual(parseMyDefaultPreset(JSON.stringify(preset)), preset);
+  it("converts an old percentage preset (version 1) to seconds once", () => {
+    const v1 = {
+      version: 1,
+      referenceDuration: 120,
+      transitions: [{ position: 0.25, kind: "dissolve", duration: 0.5 }],
+      freezes: [{ position: 0.5, duration: 5, zoomTo: 1.15, zoomDirection: "center" }],
+      updatedAt: NOW.toISOString(),
+    };
+    const parsed = parseMyDefaultPreset(JSON.stringify(v1))!;
+    assert.equal(parsed.version, 2);
+    assert.equal(parsed.repeat, true);
+    assert.equal(parsed.patternLength, 120);
+    assert.equal(parsed.transitions[0].at, 30);
+    assert.equal(parsed.freezes[0].at, 60);
     assert.equal(parseMyDefaultPreset("{oops"), null);
-    assert.equal(parseMyDefaultPreset(JSON.stringify({ version: 2 })), null);
+    assert.equal(parseMyDefaultPreset(JSON.stringify({ version: 3, transitions: [], freezes: [] })), null);
   });
 });
 

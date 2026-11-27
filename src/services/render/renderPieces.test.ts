@@ -115,8 +115,8 @@ describe("buildPieceArgs", () => {
   });
 
   it("uses only filters available in the bundled FFmpegKit min build", () => {
-    const allowed = new Set(["trim", "setpts", "fps", "scale", "setsar", "format", "settb", "tpad", "zoompan", "xfade"]);
-    const params = new Set(["end_frame", "stop_mode", "stop_duration", "duration", "offset", "transition", "z", "x", "y", "d", "s", "flags"]);
+    const allowed = new Set(["trim", "setpts", "fps", "scale", "setsar", "format", "settb", "tpad", "zoompan", "xfade", "color", "geq", "maskedmerge"]);
+    const params = new Set(["end_frame", "stop_mode", "stop_duration", "duration", "offset", "transition", "z", "x", "y", "d", "s", "flags", "c", "r", "lum", "cb", "cr"]);
     for (const piece of planPieces(buildTimeline(userEdit()), FPS)) {
       const graph = graphOf(buildPieceArgs({ piece, source: SOURCE, inputPath: "/in.mp4", outputPath: "/o.mp4", encoder: "mpeg4", previousPiecePath: "/prev.mp4" }));
       for (const m of graph.matchAll(/(?:^|[\],;:])([a-z_]+)=/g)) {
@@ -149,5 +149,24 @@ describe("joining", () => {
 
   it("writes a safe concat list", () => {
     assert.equal(buildConcatList(["/a/p0.mp4", "/a/it's.mp4"]), "file '/a/p0.mp4'\nfile '/a/it'\\''s.mp4'\n");
+  });
+});
+
+describe("transition effects", () => {
+  const kinds = ["fade", "dissolve", "fadeblack", "slideleft", "slideright", "wipe", "checkerboard", "snowdrift", "pixelize", "elastic"] as const;
+  it("every kind renders with only built-in xfade or the fast mask path (no slow per-pixel xfade expression)", () => {
+    for (const kind of kinds) {
+      const graph = graphOf(buildPieceArgs({
+        piece: { index: 1, frames: 180, content: { type: "clip", sourceStart: 10 }, transitionIn: { kind, frames: 90, fromPiece: 0 } },
+        source: SOURCE, inputPath: "/in.mp4", outputPath: "/o.mp4", encoder: "mpeg4", previousPiecePath: "/prev.mp4",
+      }));
+      assert.ok(!graph.includes("transition=custom"), kind);
+      if (kind === "checkerboard" || kind === "snowdrift") {
+        assert.match(graph, /maskedmerge\[v\]/);
+        assert.match(graph, /flags=neighbor/);
+      } else {
+        assert.match(graph, /xfade=transition=\w+:duration=3:offset=0\[v\]/);
+      }
+    }
   });
 });

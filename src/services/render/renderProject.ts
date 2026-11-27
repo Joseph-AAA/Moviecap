@@ -20,7 +20,7 @@ import type { EditConfig } from "@/types/edit";
 export { isRenderingAvailable };
 
 export interface RenderHandle {
-  /** Resolves with the saved file URI; rejects on failure or cancel. */
+  /** Resolves with the rendered file URI; rejects on failure or cancel. */
   done: Promise<string>;
   cancel: () => void;
 }
@@ -45,6 +45,11 @@ function isCancelError(error: unknown): boolean {
       "code" in error &&
       (error as { code?: string }).code === "ERR_FFMPEG_CANCELLED")
   );
+}
+
+function even(value: number): number {
+  const rounded = Math.max(2, Math.round(value));
+  return rounded - (rounded % 2);
 }
 
 /**
@@ -79,25 +84,29 @@ async function cleanUpRenderLeftovers(projectId: string): Promise<void> {
 /** Share of the progress bar used by the pieces; the rest is the final encode. */
 const PIECES_SHARE = 0.65;
 
+interface RenderJob {
+  config: EditConfig;
+  range: { start: number; end: number };
+  output: File;
+  onProgress: (fraction: number) => void;
+  /** Render smaller than the source (for quick previews). */
+  maxWidth?: number;
+  beforeStart?: () => Promise<void>;
+  /** Called after the file is written; failures delete the output. */
+  afterSuccess?: (outputDuration: number) => Promise<void>;
+}
+
 /**
- * Render the project's saved edit for `range` to a NEW mp4 in the project
- * folder and record it as a clip. The source video is only ever read.
- *
- * Piece by piece (see renderPieces.ts): each timeline item is a small FFmpeg
- * run, then the pieces are joined without re-encoding and the original
- * audio is added. Memory stays small for any video length.
+ * Shared renderer used by Export and Preview. Piece by piece (see
+ * renderPieces.ts): each timeline item is a small FFmpeg run, the pieces are
+ * joined with ONE final encode and the original audio is added. Memory stays
+ * small for any video length. The source video is only ever read.
  *
  * Encoder: hardware H.264 first; if the device's encoder fails, ALL pieces
- * are rendered again with the software mpeg4 encoder (pieces must match to
- * be joined without re-encoding).
+ * are rendered again with the software mpeg4 encoder.
  */
-export function renderProjectEdit(
-  projectId: string,
-  config: EditConfig,
-  onProgress: (fraction: number) => void,
-  /** Source range to export (the trim selection). Default: whole video. */
-  range: { start: number; end: number } = { start: 0, end: config.sourceDuration },
-): RenderHandle {
+function startRender(job: RenderJob): RenderHandle {
+  const { config, range, output, onProgress } = job;
   const native = MoviecapFfmpeg;
   if (!native) {
     return {
@@ -122,7 +131,7 @@ export function renderProjectEdit(
   const subscription = native.addListener("onProgress", (event) => {
     if (event.jobId !== jobId) return;
     sessionId = event.sessionId;
-    const inRun = Math.min(1, (event.timeMs / 1000) * fps / Math.max(1, runFrames));
+    const inRun = Math.min(1, ((event.timeMs / 1000) * fps) / Math.max(1, runFrames));
     onProgress(Math.min(0.999, progressBase + progressSpan * inRun));
   });
 
@@ -134,20 +143,21 @@ export function renderProjectEdit(
 
   const done = (async () => {
     const workDir = new Directory(Paths.cache, `render-${jobId}`);
-    const output = new File(createProjectDirectory(projectId), `edit-${Date.now()}.mp4`);
 
     try {
       if (timeline.items.length === 0) throw new Error("The selected range is empty.");
-      await cleanUpRenderLeftovers(projectId);
+      await job.beforeStart?.();
 
       const inputPath = toFsPath(config.sourceUri);
       const probe = await native.probe(inputPath);
+      const scale =
+        job.maxWidth && probe.width > job.maxWidth ? job.maxWidth / probe.width : 1;
       const source: SourceInfo = {
-        width: probe.width,
-        height: probe.height,
+        width: even(probe.width * scale),
+        height: even(probe.height * scale),
         frameRate: probe.frameRate,
         hasAudio: probe.hasAudio,
-        videoBitrate: probe.videoBitrate,
+        videoBitrate: probe.videoBitrate * scale * scale,
       };
       fps = outputFps(source);
 
@@ -193,7 +203,7 @@ export function renderProjectEdit(
         await renderAll(encoder);
       }
 
-      // Join (no video re-encode) + original audio for the range.
+      // Join + one final encode + original audio for the range.
       const listFile = new File(workDir, "pieces.txt");
       listFile.create({ overwrite: true });
       // write() is async in this expo-file-system version: wait for it, or
@@ -226,12 +236,7 @@ export function renderProjectEdit(
         throw new Error("Rendering finished but no video was written.");
       }
 
-      await addProjectExport(
-        projectId,
-        output.uri,
-        timeline.outputDuration,
-        `Edited · ${new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" })}`,
-      );
+      await job.afterSuccess?.(timeline.outputDuration);
       onProgress(1);
       return output.uri;
     } catch (error) {
@@ -259,4 +264,139 @@ export function renderProjectEdit(
       native.cancel(sessionId);
     },
   };
+}
+
+/**
+ * Export: render the project's saved edit for `range` (the trim selection)
+ * to a NEW mp4 in the project folder and record it as a clip.
+ */
+export function renderProjectEdit(
+  projectId: string,
+  config: EditConfig,
+  onProgress: (fraction: number) => void,
+  range: { start: number; end: number } = { start: 0, end: config.sourceDuration },
+): RenderHandle {
+  const output = new File(createProjectDirectory(projectId), `edit-${Date.now()}.mp4`);
+  return startRender({
+    config,
+    range,
+    output,
+    onProgress,
+    beforeStart: () => cleanUpRenderLeftovers(projectId),
+    afterSuccess: (duration) =>
+      addProjectExport(
+        projectId,
+        output.uri,
+        duration,
+        `Edited · ${new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" })}`,
+      ),
+  });
+}
+
+/** Seconds of normal video shown before and after a previewed transition. */
+const PREVIEW_MARGIN_SECONDS = 1.5;
+const PREVIEW_MAX_WIDTH = 360;
+
+/** Where a transition preview at `cutTime` starts and ends (source seconds). */
+export function transitionPreviewRange(
+  config: EditConfig,
+  cutTime: number,
+  transitionSeconds: number,
+): { start: number; end: number } {
+  // The outgoing layer is the last `transitionSeconds` before the cut, so
+  // start early enough to include it plus a short lead-in.
+  return {
+    start: Math.max(0, cutTime - transitionSeconds - PREVIEW_MARGIN_SECONDS),
+    end: Math.min(config.sourceDuration, cutTime + transitionSeconds + PREVIEW_MARGIN_SECONDS),
+  };
+}
+
+/**
+ * Preview: render ONE transition exactly like the export will (same engine),
+ * but small (360 px wide) and only around the cut, into a temporary file.
+ * Nothing is saved to the project; older previews are deleted first.
+ */
+export function renderTransitionPreview(
+  config: EditConfig,
+  cutTime: number,
+  transitionSeconds: number,
+  onProgress: (fraction: number) => void,
+): RenderHandle {
+  const previews = new Directory(Paths.cache, "transition-previews");
+  try {
+    if (previews.exists) previews.delete();
+    previews.create({ intermediates: true, idempotent: true });
+  } catch (error) {
+    console.warn("Could not reset preview folder:", error);
+  }
+
+  return startRender({
+    config,
+    range: transitionPreviewRange(config, cutTime, transitionSeconds),
+    output: new File(previews, `preview-${Date.now()}.mp4`),
+    onProgress,
+    maxWidth: PREVIEW_MAX_WIDTH,
+  });
+}
+
+const EDITED_PREVIEW_MAX_WIDTH = 480;
+
+/** Short stable hash of what affects the picture (not timestamps). */
+function editFingerprint(config: EditConfig): string {
+  const relevant = JSON.stringify({
+    source: config.sourceUri,
+    duration: Math.round(config.sourceDuration * 1000),
+    segments: config.defaultEdit?.segments ?? [],
+    transitions: [...(config.defaultEdit?.transitions ?? []), ...config.custom.transitions],
+    freezes: [...(config.defaultEdit?.freezes ?? []), ...config.custom.freezes],
+    blurs: config.custom.blurs,
+  });
+  let hash = 5381;
+  for (let i = 0; i < relevant.length; i++) {
+    hash = ((hash << 5) + hash + relevant.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(36);
+}
+
+/**
+ * The whole edited video, rendered small (480 px wide) for the Edit page
+ * player, so effects are seen exactly as exported without exporting.
+ * Effects never change timing, so it lines up 1:1 with the original.
+ * Cached per project + edit: reopening an unchanged edit is instant.
+ * Nothing is saved to the project's clips.
+ */
+export function renderEditedPreview(
+  projectId: string,
+  config: EditConfig,
+  onProgress: (fraction: number) => void,
+): RenderHandle {
+  const folder = new Directory(Paths.cache, "edited-previews", projectId);
+  const name = `edited-${editFingerprint(config)}`;
+  const output = new File(folder, `${name}.mp4`);
+  // Render to ".part" and rename only when complete, so a render killed
+  // half-way is never mistaken for a finished preview next time.
+  const partial = new File(folder, `${name}.part.mp4`);
+
+  try {
+    if (output.exists && output.size > 0) {
+      onProgress(1);
+      return { done: Promise.resolve(output.uri), cancel: () => {} };
+    }
+    // Only one preview per project: remove previews of older edits.
+    if (folder.exists) folder.delete();
+    folder.create({ intermediates: true, idempotent: true });
+  } catch (error) {
+    console.warn("Could not prepare the preview folder:", error);
+  }
+
+  return startRender({
+    config,
+    range: { start: 0, end: config.sourceDuration },
+    output: partial,
+    onProgress,
+    maxWidth: EDITED_PREVIEW_MAX_WIDTH,
+    // move() updates `partial` to point at the final name, which startRender
+    // then returns.
+    afterSuccess: () => partial.move(output),
+  });
 }
