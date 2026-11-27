@@ -44,3 +44,7 @@ example
 
 # Local database copies used for inspection
 moviecap-inspect.db
+
+# Native build output of local Expo modules
+modules/*/android/build/
+modules/*/android/.gradle/
