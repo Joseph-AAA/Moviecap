@@ -12,6 +12,13 @@ interface DefaultEditPanelProps {
   isBusy: boolean;
   onApply: (regenerate: boolean) => void;
   onUnapply: () => void;
+  /** Whether the user has set up My Default. */
+  hasMyDefault: boolean;
+  onApplyMine: () => void;
+  onSetUpMine: () => void;
+  onSaveAsMine: () => void;
+  /** True when this video has effects worth saving as My Default. */
+  canSaveAsMine: boolean;
 }
 
 function formatTimestamp(seconds: number) {
@@ -31,13 +38,31 @@ export default function DefaultEditPanel({
   isBusy,
   onApply,
   onUnapply,
+  hasMyDefault,
+  onApplyMine,
+  onSetUpMine,
+  onSaveAsMine,
+  canSaveAsMine,
 }: DefaultEditPanelProps) {
   const defaultEdit = config?.defaultEdit ?? null;
   const isApplied = defaultEdit !== null;
+  const isMine = defaultEdit?.source === "mine";
 
   const handleApplyPress = () => {
     if (!isApplied) {
       onApply(false);
+      return;
+    }
+
+    if (isMine) {
+      Alert.alert(
+        "Replace My Default?",
+        "Use the original random Default instead of My Default on this video?",
+        [
+          { text: "Keep My Default", style: "cancel" },
+          { text: "Use Default", onPress: () => onApply(true) },
+        ],
+      );
       return;
     }
 
@@ -48,6 +73,32 @@ export default function DefaultEditPanel({
       [
         { text: "Keep current", style: "cancel" },
         { text: "Regenerate", onPress: () => onApply(true) },
+      ],
+    );
+  };
+
+  const handleApplyMinePress = () => {
+    if (!isApplied) {
+      onApplyMine();
+      return;
+    }
+    Alert.alert(
+      isMine ? "Re-apply My Default?" : "Replace Default with My Default?",
+      "Your own custom transitions on this video are kept.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Apply My Default", onPress: onApplyMine },
+      ],
+    );
+  };
+
+  const handleSaveAsMinePress = () => {
+    Alert.alert(
+      "Save as My Default?",
+      "The transitions and freeze frames on this video become My Default (as % of the length), ready for any other video.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Save", onPress: onSaveAsMine },
       ],
     );
   };
@@ -109,7 +160,7 @@ export default function DefaultEditPanel({
               fontWeight: "700",
             }}
           >
-            {isApplied ? "APPLIED" : "OFF"}
+            {isApplied ? (isMine ? "MY DEFAULT" : "APPLIED") : "OFF"}
           </Text>
         </View>
       </View>
@@ -137,7 +188,7 @@ export default function DefaultEditPanel({
             <ActivityIndicator color="#fff" />
           ) : (
             <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
-              {isApplied ? "Regenerate" : "Apply Default"}
+              {isApplied && !isMine ? "Regenerate" : "Apply Default"}
             </Text>
           )}
         </Pressable>
@@ -162,6 +213,53 @@ export default function DefaultEditPanel({
           </Text>
         </Pressable>
       </View>
+
+      <View style={{ flexDirection: "row", gap: 10 }}>
+        <Pressable
+          onPress={hasMyDefault ? handleApplyMinePress : onSetUpMine}
+          disabled={!isReady || isBusy}
+          style={{
+            flex: 1,
+            minHeight: 44,
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: C.primary,
+            alignItems: "center",
+            justifyContent: "center",
+            opacity: !isReady || isBusy ? 0.5 : 1,
+          }}
+        >
+          <Text style={{ color: C.primaryLight, fontSize: 14, fontWeight: "700" }}>
+            {hasMyDefault ? "Apply My Default" : "Set up My Default"}
+          </Text>
+        </Pressable>
+
+        {hasMyDefault && (
+          <Pressable
+            onPress={onSetUpMine}
+            disabled={isBusy}
+            accessibilityLabel="Edit My Default"
+            style={{
+              width: 52,
+              minHeight: 44,
+              borderRadius: 10,
+              backgroundColor: C.elevated,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Text style={{ color: C.text, fontSize: 18 }}>⚙</Text>
+          </Pressable>
+        )}
+      </View>
+
+      {canSaveAsMine && (
+        <Pressable onPress={handleSaveAsMinePress} disabled={isBusy} hitSlop={6}>
+          <Text style={{ color: C.primaryLight, fontSize: 12 }}>
+            ★ Save this edit as My Default
+          </Text>
+        </Pressable>
+      )}
 
       {defaultEdit && timeline && config && (
         <View style={{ gap: 10 }}>

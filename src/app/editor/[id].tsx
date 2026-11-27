@@ -1,27 +1,32 @@
 import DefaultEditPanel from "@/components/editor/DefaultEditPanel";
-import RenderEditCard from "@/components/editor/RenderEditCard";
+import ExportCard from "@/components/editor/ExportCard";
 import TransitionsPanel from "@/components/editor/TransitionsPanel";
 import VideoPreview from "@/components/editor/VideoPreview";
 import { MovieCapColors as C } from "@/constants/theme";
 import {
+  getMyDefaultPreset,
   getProjectById,
   getProjectEdit,
   getProjectExportById,
+  saveMyDefaultPreset,
   saveProjectEdit,
 } from "@/services/database";
 import {
   applyDefaultEdit,
+  applyMyDefault,
   buildTimeline,
   createEmptyEditConfig,
+  hasEditEffects,
+  presetFromConfig,
   removeCustomTransition,
   resolveFreezes,
   setCustomTransition,
   unapplyDefaultEdit,
 } from "@/services/timeline/editTimeline";
-import type { EditConfig, TransitionKind } from "@/types/edit";
+import type { EditConfig, MyDefaultPreset, TransitionKind } from "@/types/edit";
 import type { ProjectExport, VideoProject } from "@/types/project";
 import { clipDisplayName, formatClipDuration } from "@/utils/exportFormat";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -33,15 +38,6 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-
-function hasEffects(config: EditConfig): boolean {
-  return (
-    config.defaultEdit !== null ||
-    config.custom.transitions.length > 0 ||
-    config.custom.freezes.length > 0 ||
-    config.custom.blurs.length > 0
-  );
-}
 
 export default function EditorScreen() {
   // clipId (optional): edit a trimmed clip instead of the original video.
@@ -63,6 +59,12 @@ export default function EditorScreen() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
+  // Trim selection reported by the preview; the one Export button uses it.
+  const [trimRange, setTrimRange] = useState({ start: 0, end: 0 });
+  const handleTrimChange = useCallback((start: number, end: number) => {
+    setTrimRange({ start, end });
+  }, []);
+
   // Playhead is kept in a ref: it changes 10x per second and only matters
   // when "Add at playhead" is pressed, so it must not re-render the screen.
   const playheadRef = useRef(0);
@@ -70,6 +72,22 @@ export default function EditorScreen() {
     playheadRef.current = time;
   }, []);
   const [seekRequest, setSeekRequest] = useState<{ time: number; key: number } | null>(null);
+
+  // The user's reusable My Default; reloaded when returning from its setup.
+  const [myDefault, setMyDefault] = useState<MyDefaultPreset | null>(null);
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
+      getMyDefaultPreset()
+        .then((preset) => {
+          if (isActive) setMyDefault(preset);
+        })
+        .catch((err) => console.error("Failed to load My Default:", err));
+      return () => {
+        isActive = false;
+      };
+    }, []),
+  );
 
   // Stop vertical scrolling while a trim handle or the playhead is dragged.
   const handleDraggingChange = useCallback((isDragging: boolean) => {
@@ -157,6 +175,27 @@ export default function EditorScreen() {
   const handleUnapplyDefault = () =>
     void updateEdit((base) => unapplyDefaultEdit(base));
 
+  const handleApplyMine = () => {
+    if (!myDefault) return;
+    void updateEdit((base) => applyMyDefault(base, myDefault));
+  };
+
+  const handleSaveAsMine = async () => {
+    if (!editConfig) return;
+    try {
+      const preset = presetFromConfig({ ...editConfig, sourceDuration: videoDuration || editConfig.sourceDuration });
+      await saveMyDefaultPreset(preset);
+      setMyDefault(preset);
+      Alert.alert(
+        "My Default saved",
+        `${preset.transitions.length} transitions and ${preset.freezes.length} freeze frames. Use “Apply My Default” on any video.`,
+      );
+    } catch (err) {
+      console.error("Failed to save My Default:", err);
+      Alert.alert("Could not save", "Please try again.");
+    }
+  };
+
   const handleSaveTransition = (at: number, kind: TransitionKind, duration: number) =>
     void updateEdit((base) => setCustomTransition(base, at, kind, duration));
 
@@ -218,13 +257,24 @@ export default function EditorScreen() {
           <VideoPreview
             key={clip?.uri ?? project.originalUri}
             uri={clip?.uri ?? project.originalUri}
-            projectId={project.id}
+            onTrimChange={handleTrimChange}
             onDraggingChange={handleDraggingChange}
             onDurationLoaded={setVideoDuration}
             onPlayheadChange={handlePlayheadChange}
             seekRequest={seekRequest}
             effectsPreview={effectsPreview}
           />
+
+          {/* The ONE Export: trim selection, with effects when applied. */}
+          {videoDuration > 0 && trimRange.end > trimRange.start && (
+            <ExportCard
+              projectId={project.id}
+              sourceUri={clip?.uri ?? project.originalUri}
+              config={clip ? null : editConfig}
+              range={trimRange}
+              videoDuration={videoDuration}
+            />
+          )}
 
           {!clip && (
             <DefaultEditPanel
@@ -233,6 +283,11 @@ export default function EditorScreen() {
               isBusy={isSavingEdit}
               onApply={handleApplyDefault}
               onUnapply={handleUnapplyDefault}
+              hasMyDefault={myDefault !== null}
+              onApplyMine={handleApplyMine}
+              onSetUpMine={() => router.push("/my-default")}
+              onSaveAsMine={() => void handleSaveAsMine()}
+              canSaveAsMine={editConfig !== null && hasEditEffects(editConfig)}
             />
           )}
 
@@ -250,10 +305,6 @@ export default function EditorScreen() {
             />
           )}
 
-          {/* Only when there is something to render beyond a plain copy. */}
-          {!clip && editConfig && hasEffects(editConfig) && (
-            <RenderEditCard projectId={project.id} config={editConfig} />
-          )}
 
           <View style={styles.info}>
             <Text style={styles.projectName}>{project.name}</Text>

@@ -1,7 +1,3 @@
-import { addProjectExport } from "@/services/database";
-import { saveTrimmedVideo } from "@/services/videoStorage";
-import { trim } from "react-native-video-trim";
-
 import { useEvent, useEventListener } from "expo";
 import { File } from "expo-file-system";
 import { Image } from "expo-image";
@@ -9,7 +5,6 @@ import { useVideoPlayer, VideoView, type VideoThumbnail } from "expo-video";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   PanResponder,
   Pressable,
   StyleSheet,
@@ -25,9 +20,8 @@ import type { FreezeEffect } from "@/types/edit";
 
 interface VideoPreviewProps {
   uri: string;
-  projectId: string;
-  /** Called after a trimmed clip has been saved and recorded. */
-  onExported?: () => void;
+  /** Reports the trim selection (seconds) whenever the handles move. */
+  onTrimChange?: (start: number, end: number) => void;
   /** Lets a parent ScrollView disable scrolling while a handle is dragged. */
   onDraggingChange?: (isDragging: boolean) => void;
   /** Reports the real video duration (seconds) once the source loads. */
@@ -49,15 +43,13 @@ const PLAYHEAD_TOUCH_WIDTH = 40;
 
 export default function VideoPreview({
   uri,
-  projectId,
-  onExported,
+  onTrimChange,
   onDraggingChange,
   onDurationLoaded,
   onPlayheadChange,
   seekRequest,
   effectsPreview,
 }: VideoPreviewProps) {
-  const [isExporting, setIsExporting] = useState(false);
   const videoUri = useMemo(() => new File(uri).contentUri, [uri]);
   const player = useVideoPlayer(videoUri);
 
@@ -86,58 +78,11 @@ export default function VideoPreview({
   const rightDragStartTimeRef = useRef(0);
   const playheadDragStartTimeRef = useRef(0);
 
-  const handleExport = async () => {
-    if (isExporting) return;
-
-    const selectedDuration = trimEnd - trimStart;
-
-    if (selectedDuration < MIN_TRIM_DURATION) {
-      Alert.alert("Invalid selection", "Please select at least 0.5 seconds.");
-      return;
-    }
-
-    try {
-      setIsExporting(true);
-      player.pause();
-
-      const result = await trim(uri, {
-        startTime: Math.round(trimStart * 1000),
-        endTime: Math.round(trimEnd * 1000),
-        type: "video",
-        outputExt: "mp4",
-        saveToPhoto: false,
-        removeAfterSavedToPhoto: false,
-        removeAfterFailedToSavePhoto: false,
-        enablePreciseTrimming: true,
-        removeAudio: false,
-        speed: 1.0,
-      });
-
-      if (!result.success || !result.outputPath) {
-        throw new Error("The video trimming operation failed.");
-      }
-
-      const savedFile = await saveTrimmedVideo(result.outputPath, projectId);
-
-      // Records the export in project_exports and updates projects.exportedUri.
-      await addProjectExport(projectId, savedFile.uri, result.duration / 1000);
-      onExported?.();
-
-      Alert.alert(
-        "Export successful",
-        "Find it under Trimmed Clips on the Projects page.",
-      );
-    } catch (error) {
-      console.error("Video export failed:", error);
-
-      Alert.alert(
-        "Export failed",
-        error instanceof Error ? error.message : "Could not export your video.",
-      );
-    } finally {
-      setIsExporting(false);
-    }
-  };
+  // Export now lives on the Edit screen (one Export button for trim and
+  // effects); this component only reports the selection.
+  useEffect(() => {
+    if (trimEnd > trimStart) onTrimChange?.(trimStart, trimEnd);
+  }, [trimStart, trimEnd, onTrimChange]);
 
   useEffect(() => {
     onDraggingChange?.(isDragging);
@@ -647,50 +592,11 @@ export default function VideoPreview({
         </View>
       </View>
 
-      <Pressable
-        onPress={handleExport}
-        disabled={
-          isExporting || !duration || trimEnd - trimStart < MIN_TRIM_DURATION
-        }
-        style={[
-          styles.exportButton,
-          isExporting && styles.exportButtonDisabled,
-        ]}
-      >
-        {isExporting ? (
-          <>
-            <ActivityIndicator color="#fff" />
-            <Text style={styles.exportButtonText}>Exporting...</Text>
-          </>
-        ) : (
-          <Text style={styles.exportButtonText}>Export Trimmed Video</Text>
-        )}
-      </Pressable>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  exportButton: {
-    marginHorizontal: 16,
-    marginTop: 16,
-    marginBottom: 16,
-    minHeight: 48,
-    borderRadius: 10,
-    backgroundColor: C.primary,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 8,
-  },
-  exportButtonDisabled: {
-    opacity: 0.6,
-  },
-  exportButtonText: {
-    color: "#fff",
-    fontSize: 15,
-    fontWeight: "600",
-  },
   container: {
     width: "100%",
     backgroundColor: "#000000",

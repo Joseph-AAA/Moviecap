@@ -4,8 +4,11 @@ import type {
   VideoProject,
 } from "@/types/project";
 
-import { parseEditConfig } from "@/services/timeline/editTimeline";
-import type { EditConfig } from "@/types/edit";
+import {
+  parseEditConfig,
+  parseMyDefaultPreset,
+} from "@/services/timeline/editTimeline";
+import type { EditConfig, MyDefaultPreset } from "@/types/edit";
 import * as SQLite from "expo-sqlite";
 
 const DATABASE_NAME = "moviecap.db";
@@ -82,6 +85,15 @@ export async function initializeDatabase(): Promise<void> {
         CREATE TABLE IF NOT EXISTS project_edits (
           projectId TEXT PRIMARY KEY NOT NULL,
           config TEXT NOT NULL,
+          updatedAt TEXT NOT NULL
+        );
+      `);
+
+      // App-wide settings (e.g. the user's My Default preset), JSON values.
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY NOT NULL,
+          value TEXT NOT NULL,
           updatedAt TEXT NOT NULL
         );
       `);
@@ -296,6 +308,33 @@ export async function saveProjectEdit(
     projectId,
     JSON.stringify(config),
     config.updatedAt,
+  );
+}
+
+const MY_DEFAULT_KEY = "myDefaultPreset";
+
+// The user's My Default preset, or null if not set up yet / unreadable.
+export async function getMyDefaultPreset(): Promise<MyDefaultPreset | null> {
+  await initializeDatabase();
+  const db = await getDatabase();
+
+  const row = await db.getFirstAsync<{ value: string }>(
+    "SELECT value FROM app_settings WHERE key = ?",
+    MY_DEFAULT_KEY,
+  );
+
+  return row ? parseMyDefaultPreset(row.value) : null;
+}
+
+export async function saveMyDefaultPreset(preset: MyDefaultPreset): Promise<void> {
+  await initializeDatabase();
+  const db = await getDatabase();
+
+  await db.runAsync(
+    `INSERT OR REPLACE INTO app_settings (key, value, updatedAt) VALUES (?, ?, ?)`,
+    MY_DEFAULT_KEY,
+    JSON.stringify(preset),
+    preset.updatedAt,
   );
 }
 

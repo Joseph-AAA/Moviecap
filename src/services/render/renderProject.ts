@@ -1,15 +1,19 @@
-import { File } from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 
 import MoviecapFfmpeg, {
   isRenderingAvailable,
 } from "../../../modules/moviecap-ffmpeg";
-import { addProjectExport } from "@/services/database";
+import { addProjectExport, getProjectExports } from "@/services/database";
 import {
-  buildRenderArgs,
+  buildConcatList,
+  buildFinalArgs,
+  buildPieceArgs,
+  outputFps,
+  planPieces,
   type SourceInfo,
   type VideoEncoder,
-} from "@/services/render/renderCommand";
-import { buildTimeline } from "@/services/timeline/editTimeline";
+} from "@/services/render/renderPieces";
+import { buildTimeline, cropTimeline } from "@/services/timeline/editTimeline";
 import { createProjectDirectory } from "@/services/videoStorage";
 import type { EditConfig } from "@/types/edit";
 
@@ -44,16 +48,55 @@ function isCancelError(error: unknown): boolean {
 }
 
 /**
- * Render the project's saved edit to a NEW mp4 in the project folder and
- * record it as a clip. The source video is only ever read.
+ * Remove what an earlier render left behind when the app was killed
+ * mid-render (Android does that when memory runs out): temporary piece
+ * folders in the cache, and edit-*.mp4 files in the project folder that were
+ * never recorded as a clip. Recorded clips and the original are never
+ * touched.
+ */
+async function cleanUpRenderLeftovers(projectId: string): Promise<void> {
+  try {
+    for (const item of new Directory(Paths.cache).list()) {
+      if (item instanceof Directory && item.name.startsWith("render-job-")) item.delete();
+    }
+
+    // Compare by FILE NAME (unique per render), not full URI, so a different
+    // URI spelling can never make a real clip look like an orphan.
+    const recorded = new Set(
+      (await getProjectExports(projectId)).map((e) => decodeURI(e.uri).split("/").pop()),
+    );
+    for (const item of createProjectDirectory(projectId).list()) {
+      if (item instanceof File && /^edit-\d+\.mp4$/.test(item.name) && !recorded.has(item.name)) {
+        item.delete();
+      }
+    }
+  } catch (error) {
+    // Cleanup must never block a new export.
+    console.warn("Could not clean up old render files:", error);
+  }
+}
+
+/** Share of the progress bar used by the pieces; the rest is the join. */
+const PIECES_SHARE = 0.95;
+
+/**
+ * Render the project's saved edit for `range` to a NEW mp4 in the project
+ * folder and record it as a clip. The source video is only ever read.
  *
- * Encoder strategy: hardware H.264 first (fast, small files); if the device's
- * encoder rejects the job, retry once with the software mpeg4 encoder.
+ * Piece by piece (see renderPieces.ts): each timeline item is a small FFmpeg
+ * run, then the pieces are joined without re-encoding and the original
+ * audio is added. Memory stays small for any video length.
+ *
+ * Encoder: hardware H.264 first; if the device's encoder fails, ALL pieces
+ * are rendered again with the software mpeg4 encoder (pieces must match to
+ * be joined without re-encoding).
  */
 export function renderProjectEdit(
   projectId: string,
   config: EditConfig,
   onProgress: (fraction: number) => void,
+  /** Source range to export (the trim selection). Default: whole video. */
+  range: { start: number; end: number } = { start: 0, end: config.sourceDuration },
 ): RenderHandle {
   const native = MoviecapFfmpeg;
   if (!native) {
@@ -66,21 +109,39 @@ export function renderProjectEdit(
   }
 
   const jobId = `job-${Date.now()}`;
+  const timeline = cropTimeline(buildTimeline(config), range.start, range.end);
   let sessionId: number | null = null;
   let cancelled = false;
+
+  // Progress inside the current FFmpeg run (frames rendered so far).
+  let progressBase = 0;
+  let progressSpan = 0;
+  let runFrames = 1;
+  let fps = 30;
 
   const subscription = native.addListener("onProgress", (event) => {
     if (event.jobId !== jobId) return;
     sessionId = event.sessionId;
-    const total = buildTimeline(config).outputDuration;
-    if (total > 0) onProgress(Math.min(1, event.timeMs / 1000 / total));
+    const inRun = Math.min(1, (event.timeMs / 1000) * fps / Math.max(1, runFrames));
+    onProgress(Math.min(0.999, progressBase + progressSpan * inRun));
   });
 
+  const run = async (args: string[]) => {
+    if (cancelled) throw new RenderCancelledError();
+    await native.execute(jobId, args);
+    if (cancelled) throw new RenderCancelledError();
+  };
+
   const done = (async () => {
+    const workDir = new Directory(Paths.cache, `render-${jobId}`);
     const output = new File(createProjectDirectory(projectId), `edit-${Date.now()}.mp4`);
 
     try {
-      const probe = await native.probe(toFsPath(config.sourceUri));
+      if (timeline.items.length === 0) throw new Error("The selected range is empty.");
+      await cleanUpRenderLeftovers(projectId);
+
+      const inputPath = toFsPath(config.sourceUri);
+      const probe = await native.probe(inputPath);
       const source: SourceInfo = {
         width: probe.width,
         height: probe.height,
@@ -88,30 +149,69 @@ export function renderProjectEdit(
         hasAudio: probe.hasAudio,
         videoBitrate: probe.videoBitrate,
       };
-      const timeline = buildTimeline(config);
+      fps = outputFps(source);
 
-      const run = (encoder: VideoEncoder) =>
-        native.execute(
-          jobId,
-          buildRenderArgs({
-            timeline,
-            source,
-            inputPath: toFsPath(config.sourceUri),
-            outputPath: toFsPath(output.uri),
-            encoder,
-          }),
-        );
+      const pieces = planPieces(timeline, fps);
+      const totalFrames = pieces.reduce((sum, p) => sum + p.frames, 0);
+      if (pieces.length === 0 || totalFrames === 0) throw new Error("The selected range is empty.");
+
+      workDir.create({ intermediates: true, idempotent: true });
+      const piecePath = (i: number) =>
+        toFsPath(new File(workDir, `piece-${String(i).padStart(4, "0")}.mp4`).uri);
+
+      const renderAll = async (encoder: VideoEncoder) => {
+        let framesDone = 0;
+        for (const piece of pieces) {
+          progressBase = (framesDone / totalFrames) * PIECES_SHARE;
+          progressSpan = (piece.frames / totalFrames) * PIECES_SHARE;
+          runFrames = piece.frames;
+          await run(
+            buildPieceArgs({
+              piece,
+              source,
+              inputPath,
+              outputPath: piecePath(piece.index),
+              encoder,
+              previousPiecePath: piece.transitionIn
+                ? piecePath(piece.transitionIn.fromPiece)
+                : undefined,
+            }),
+          );
+          framesDone += piece.frames;
+          onProgress((framesDone / totalFrames) * PIECES_SHARE);
+        }
+      };
 
       try {
-        await run("h264_mediacodec");
+        await renderAll("h264_mediacodec");
       } catch (error) {
         if (cancelled || isCancelError(error)) throw new RenderCancelledError();
-        console.warn("Hardware encoder failed, retrying with software:", error);
+        console.warn("Hardware encoder failed, rendering again with software:", error);
         onProgress(0);
-        await run("mpeg4");
+        await renderAll("mpeg4");
       }
 
-      if (cancelled) throw new RenderCancelledError();
+      // Join (no video re-encode) + original audio for the range.
+      const listFile = new File(workDir, "pieces.txt");
+      listFile.create({ overwrite: true });
+      // write() is async in this expo-file-system version: wait for it, or
+      // FFmpeg reads an empty list ("No files to concat").
+      await listFile.write(buildConcatList(pieces.map((p) => piecePath(p.index))));
+
+      progressBase = PIECES_SHARE;
+      progressSpan = 1 - PIECES_SHARE;
+      runFrames = totalFrames;
+      await run(
+        buildFinalArgs({
+          listPath: toFsPath(listFile.uri),
+          inputPath,
+          outputPath: toFsPath(output.uri),
+          rangeStart: range.start,
+          duration: timeline.outputDuration,
+          hasAudio: source.hasAudio,
+        }),
+      );
+
       if (!output.exists || output.size === 0) {
         throw new Error("Rendering finished but no video was written.");
       }
@@ -134,6 +234,11 @@ export function renderProjectEdit(
       throw isCancelError(error) || cancelled ? new RenderCancelledError() : error;
     } finally {
       subscription.remove();
+      try {
+        if (workDir.exists) workDir.delete();
+      } catch (cleanupError) {
+        console.warn("Could not remove render pieces:", cleanupError);
+      }
     }
   })();
 

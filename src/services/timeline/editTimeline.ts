@@ -20,6 +20,7 @@ import type {
   DefaultEdit,
   EditConfig,
   FreezeEffect,
+  MyDefaultPreset,
   Segment,
   Timeline,
   TimelineCut,
@@ -216,6 +217,7 @@ export function generateDefaultEdit(
   const freezes = generateFreezes(duration, cutTimes, random, seed);
 
   return {
+    source: "standard",
     seed,
     generatedAt: now.toISOString(),
     segments,
@@ -243,6 +245,16 @@ export function createEmptyEditConfig(
     subtitles: { showInPreview: true, burnIn: true },
     updatedAt: now.toISOString(),
   };
+}
+
+/** True when the edit changes the picture (default or custom effects). */
+export function hasEditEffects(config: EditConfig): boolean {
+  return (
+    config.defaultEdit !== null ||
+    config.custom.transitions.length > 0 ||
+    config.custom.freezes.length > 0 ||
+    config.custom.blurs.length > 0
+  );
 }
 
 export function isDefaultApplied(config: EditConfig): boolean {
@@ -452,6 +464,76 @@ export function buildTimeline(config: EditConfig): Timeline {
 }
 
 /**
+ * Keep only the part of a resolved timeline between source times `start`
+ * and `end` (the trim selection), with output time starting at 0.
+ * - Items are cut at the range edges; pieces shorter than TIME_EPSILON drop.
+ * - A freeze cut by the range keeps its still frame and continues its zoom
+ *   from where it would be at the range start.
+ * - Cuts at or outside the range edges are dropped; transitions are
+ *   re-clamped to the shorter items.
+ */
+export function cropTimeline(timeline: Timeline, start: number, end: number): Timeline {
+  const from = Math.max(0, start);
+  const to = Math.min(timeline.outputDuration, end);
+  if (to - from <= TIME_EPSILON) return { items: [], cuts: [], outputDuration: 0 };
+
+  const keptIndex = new Map<number, number>();
+  const items: TimelineItem[] = [];
+
+  timeline.items.forEach((item, index) => {
+    const s = Math.max(item.sourceStart, from);
+    const e = Math.min(item.sourceEnd, to);
+    if (e - s <= TIME_EPSILON) return;
+
+    const outputStart = roundTime(s - from);
+    const outputEnd = roundTime(e - from);
+    keptIndex.set(index, items.length);
+
+    if (item.type === "clip") {
+      items.push({ ...item, sourceStart: roundTime(s), sourceEnd: roundTime(e), outputStart, outputEnd });
+      return;
+    }
+
+    // Continue the zoom from where it would be at the cut points.
+    const full = item.sourceEnd - item.sourceStart;
+    const zoomAt = (t: number) => {
+      const p = Math.min(1, Math.max(0, (t - item.sourceStart) / full));
+      const eased = p * p * (3 - 2 * p);
+      return item.freeze.zoomFrom + (item.freeze.zoomTo - item.freeze.zoomFrom) * eased;
+    };
+
+    items.push({
+      ...item,
+      freeze: {
+        ...item.freeze,
+        zoomFrom: Math.round(zoomAt(s) * 1000) / 1000,
+        zoomTo: Math.round(zoomAt(e) * 1000) / 1000,
+      },
+      sourceStart: roundTime(s),
+      sourceEnd: roundTime(e),
+      outputStart,
+      outputEnd,
+    });
+  });
+
+  const cuts: TimelineCut[] = timeline.cuts.flatMap((cut) => {
+    const before = keptIndex.get(cut.afterItemIndex);
+    const after = keptIndex.get(cut.afterItemIndex + 1);
+    if (before === undefined || after === undefined) return [];
+    if (!cut.transition) return [{ ...cut, afterItemIndex: before }];
+
+    const shortest = Math.min(
+      items[before].outputEnd - items[before].outputStart,
+      items[after].outputEnd - items[after].outputStart,
+    );
+    const duration = Math.min(cut.transition.duration, roundTime(shortest / 2));
+    return [{ ...cut, afterItemIndex: before, transition: { ...cut.transition, duration } }];
+  });
+
+  return { items, cuts, outputDuration: roundTime(to - from) };
+}
+
+/**
  * Convert a source time to output time. Freezes replace video and audio
  * keeps playing, so this is the identity; it exists so dubbing/subtitle code
  * has one place to change if the timing model ever changes again.
@@ -562,6 +644,162 @@ export function removeCustomTransition(
     },
     updatedAt: now.toISOString(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// My Default (the user's reusable preset; positions are fractions 0..1)
+// ---------------------------------------------------------------------------
+
+export const PRESET_FREEZE_DURATIONS = [1, 2, 3, 5, 8, 10] as const;
+export const PRESET_ZOOM_LEVELS = [1, 1.05, 1.1, 1.15, 1.2, 1.3] as const;
+
+/** A sensible starting point the first time the user opens My Default. */
+export function createStarterPreset(now: Date = new Date()): MyDefaultPreset {
+  return {
+    version: 1,
+    referenceDuration: 120,
+    transitions: [0.25, 0.5, 0.75].map((position) => ({
+      position,
+      kind: "dissolve" as const,
+      duration: 0.5,
+    })),
+    freezes: [0.15, 0.6].map((position) => ({
+      position,
+      duration: DEFAULT_FREEZE_DURATION,
+      zoomTo: DEFAULT_FREEZE_ZOOM_TO,
+      zoomDirection: "center" as const,
+    })),
+    updatedAt: now.toISOString(),
+  };
+}
+
+function clampFraction(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+/**
+ * Turn the preset into a concrete DefaultEdit for a video of `duration`
+ * seconds. Cuts closer than MIN_CUT_EDGE_DISTANCE to the ends are dropped,
+ * and freezes are clamped so they end inside the video. Conflicts follow
+ * the normal timeline rules (overlapping freeze skipped, transition inside a
+ * freeze skipped), so the result is always valid.
+ */
+export function generateFromPreset(
+  duration: number,
+  preset: MyDefaultPreset,
+  now: Date = new Date(),
+): DefaultEdit {
+  const cutTimes = preset.transitions
+    .map((t) => ({ ...t, at: roundTime(clampFraction(t.position) * duration) }))
+    .filter((t) => t.at >= MIN_CUT_EDGE_DISTANCE && t.at <= duration - MIN_CUT_EDGE_DISTANCE)
+    .sort((a, b) => a.at - b.at)
+    .filter((t, i, all) => i === 0 || !sameTime(t.at, all[i - 1].at));
+
+  const boundaries = [0, ...cutTimes.map((t) => t.at), roundTime(duration)];
+  const segments: Segment[] = boundaries.slice(0, -1).map((start, i) => ({
+    id: `seg-mine-${i}`,
+    start,
+    end: boundaries[i + 1],
+  }));
+
+  const transitions: TransitionEffect[] = cutTimes.map((t, i) => ({
+    id: `trn-mine-${i}`,
+    origin: "default",
+    at: t.at,
+    kind: t.kind,
+    duration: t.duration,
+  }));
+
+  const freezes: FreezeEffect[] = preset.freezes.flatMap((f, i) => {
+    const length = Math.min(f.duration, duration);
+    const start = roundTime(
+      Math.min(clampFraction(f.position) * duration, duration - length),
+    );
+    if (length < MIN_FREEZE_DURATION || start < 0) return [];
+    return [
+      {
+        id: `frz-mine-${i}`,
+        origin: "default" as const,
+        sourceTime: start,
+        duration: roundTime(length),
+        zoomFrom: 1,
+        zoomTo: f.zoomTo,
+        zoomDirection: f.zoomDirection,
+      },
+    ];
+  });
+
+  return {
+    source: "mine",
+    seed: 0,
+    generatedAt: now.toISOString(),
+    segments,
+    transitions,
+    freezes,
+  };
+}
+
+/** Apply My Default (replacing any active default; custom effects stay). */
+export function applyMyDefault(
+  config: EditConfig,
+  preset: MyDefaultPreset,
+  now: Date = new Date(),
+): EditConfig {
+  return {
+    ...config,
+    defaultEdit: generateFromPreset(config.sourceDuration, preset, now),
+    updatedAt: now.toISOString(),
+  };
+}
+
+/**
+ * Capture what plays in this video now (default + custom transitions and
+ * freezes) as a preset, with positions as fractions of its length.
+ * Automatic freeze-exit dissolves are not saved; they are re-created.
+ */
+export function presetFromConfig(
+  config: EditConfig,
+  now: Date = new Date(),
+): MyDefaultPreset {
+  const duration = config.sourceDuration;
+  const toFraction = (t: number) => Math.round((t / duration) * 1e6) / 1e6;
+
+  return {
+    version: 1,
+    referenceDuration: roundTime(duration),
+    transitions: listTransitionSlots(config)
+      .filter((slot) => slot.effective && slot.source !== "freeze-exit")
+      .map((slot) => ({
+        position: toFraction(slot.at),
+        kind: slot.effective!.kind,
+        duration: slot.effective!.duration,
+      })),
+    freezes: resolveFreezes(config).map((f) => ({
+      position: toFraction(f.sourceTime),
+      duration: f.duration,
+      zoomTo: f.zoomTo,
+      zoomDirection: f.zoomDirection,
+    })),
+    updatedAt: now.toISOString(),
+  };
+}
+
+/** Parse a stored preset; null for corrupt/unknown data (never crashes). */
+export function parseMyDefaultPreset(json: string): MyDefaultPreset | null {
+  try {
+    const value = JSON.parse(json) as Partial<MyDefaultPreset> | null;
+    if (
+      !value ||
+      value.version !== 1 ||
+      !Array.isArray(value.transitions) ||
+      !Array.isArray(value.freezes)
+    ) {
+      return null;
+    }
+    return value as MyDefaultPreset;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

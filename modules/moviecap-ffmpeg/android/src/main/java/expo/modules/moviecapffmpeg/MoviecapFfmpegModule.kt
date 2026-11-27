@@ -24,7 +24,7 @@ class ProbeFailedException(message: String) :
 /**
  * Thin wrapper around the FFmpegKit build that react-native-video-trim
  * already bundles. Only runs commands that the app builds itself
- * (see src/services/render/renderCommand.ts); never touches source files.
+ * (see src/services/render/renderPieces.ts); never touches source files.
  */
 class MoviecapFfmpegModule : Module() {
   override fun definition() = ModuleDefinition {

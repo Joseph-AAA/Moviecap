@@ -10,7 +10,14 @@ import {
   FREEZE_EDGE_MARGIN,
   MIN_FINAL_SEGMENT,
   applyDefaultEdit,
+  applyMyDefault,
   buildTimeline,
+  createStarterPreset,
+  cropTimeline,
+  generateFromPreset,
+  parseMyDefaultPreset,
+  presetFromConfig,
+  resolveFreezes,
   createEmptyEditConfig,
   createRandom,
   cutPlacementProblem,
@@ -323,5 +330,100 @@ describe("custom transitions (Phase 8)", () => {
     assert.ok(cutPlacementProblem(edited, 0.2));
     assert.ok(cutPlacementProblem(edited, 59.9));
     assert.equal(cutPlacementProblem(edited, 30), null);
+  });
+});
+
+describe("My Default preset", () => {
+  it("places transitions and freezes by percent on videos of any length", () => {
+    const preset = createStarterPreset(NOW); // cuts 25/50/75%, freezes 15%, 60%
+    for (const duration of [40, 120, 3600]) {
+      const edit = generateFromPreset(duration, preset, NOW);
+      assert.equal(edit.source, "mine");
+      assert.deepEqual(edit.transitions.map((t) => t.at), [0.25, 0.5, 0.75].map((p) => p * duration));
+      assert.deepEqual(edit.freezes.map((f) => f.sourceTime), [0.15, 0.6].map((p) => p * duration));
+      // Segments still cover the whole video contiguously.
+      assert.equal(edit.segments[0].start, 0);
+      assert.equal(edit.segments.at(-1)!.end, duration);
+    }
+  });
+
+  it("clamps a freeze near the end so it finishes inside the video", () => {
+    const preset = { ...createStarterPreset(NOW), freezes: [{ position: 0.99, duration: 5, zoomTo: 1.2, zoomDirection: "center" as const }] };
+    const [freeze] = generateFromPreset(20, preset, NOW).freezes;
+    assert.equal(freeze.sourceTime + freeze.duration, 20);
+  });
+
+  it("is Unapply-able like the standard default and keeps custom transitions", () => {
+    const withCustom = setCustomTransition(config(100), 10, "fade", 0.4, NOW);
+    const applied = applyMyDefault(withCustom, createStarterPreset(NOW), NOW);
+    assert.equal(applied.defaultEdit!.source, "mine");
+    const removed = unapplyDefaultEdit(applied, NOW);
+    assert.equal(removed.defaultEdit, null);
+    assert.deepEqual(removed.custom.transitions, withCustom.custom.transitions);
+  });
+
+  it("round-trips: save this edit as My Default, apply to a 2x longer video", () => {
+    const base = setCustomTransition(applyDefaultEdit(config(60), { seed: 4, now: NOW }), 50, "slideleft", 0.8, NOW);
+    const preset = presetFromConfig(base, NOW);
+    assert.ok(preset.transitions.some((t) => t.kind === "slideleft" && Math.abs(t.position - 50 / 60) < 0.001));
+    assert.ok(preset.transitions.every((t) => t.position > 0 && t.position < 1));
+
+    const longer = applyMyDefault(config(120), preset, NOW);
+    assert.ok(longer.defaultEdit!.transitions.some((t) => t.kind === "slideleft" && Math.abs(t.at - 100) < 0.2));
+    assert.equal(longer.defaultEdit!.freezes.length, resolveFreezes(base).length);
+  });
+
+  it("parses stored presets safely", () => {
+    const preset = createStarterPreset(NOW);
+    assert.deepEqual(parseMyDefaultPreset(JSON.stringify(preset)), preset);
+    assert.equal(parseMyDefaultPreset("{oops"), null);
+    assert.equal(parseMyDefaultPreset(JSON.stringify({ version: 2 })), null);
+  });
+});
+
+describe("cropTimeline (export the trim selection with effects)", () => {
+  const freeze = { id: "f", origin: "custom" as const, sourceTime: 20, duration: 5, zoomFrom: 1, zoomTo: 1.2, zoomDirection: "center" as const };
+  const edited = (): EditConfig => {
+    const base = config(60);
+    return {
+      ...base,
+      custom: { transitions: [{ id: "t", origin: "custom", at: 40, kind: "fade", duration: 0.5 }], freezes: [freeze], blurs: [] },
+    };
+  };
+
+  it("keeps only the range, back to back from 0, same length as the selection", () => {
+    const cropped = cropTimeline(buildTimeline(edited()), 10, 50);
+    assert.equal(cropped.outputDuration, 40);
+    assert.equal(cropped.items[0].outputStart, 0);
+    assert.equal(cropped.items.at(-1)!.outputEnd, 40);
+    cropped.items.forEach((item, i) => {
+      assert.equal(item.outputStart, Math.round((item.sourceStart - 10) * 1000) / 1000);
+      if (i > 0) assert.equal(item.outputStart, cropped.items[i - 1].outputEnd);
+    });
+    assert.ok(cropped.cuts.some((c) => c.transition?.id === "t"));
+  });
+
+  it("drops effects outside the selection", () => {
+    const cropped = cropTimeline(buildTimeline(edited()), 30, 39);
+    assert.deepEqual(cropped.items.map((i) => i.type), ["clip"]);
+    assert.equal(cropped.cuts.length, 0);
+  });
+
+  it("continues a freeze's zoom when the selection starts inside it", () => {
+    const cropped = cropTimeline(buildTimeline(edited()), 22.5, 30);
+    const first = cropped.items[0];
+    assert.equal(first.type, "freeze");
+    if (first.type === "freeze") {
+      assert.equal(first.freeze.sourceTime, 20); // same still frame
+      assert.ok(first.freeze.zoomFrom > 1 && first.freeze.zoomFrom < 1.2); // half-way zoom
+      assert.equal(first.freeze.zoomTo, 1.2);
+    }
+  });
+
+  it("the whole range gives back the same timeline", () => {
+    const full = buildTimeline(edited());
+    const cropped = cropTimeline(full, 0, 60);
+    assert.equal(cropped.items.length, full.items.length);
+    assert.equal(cropped.cuts.length, full.cuts.length);
   });
 });
