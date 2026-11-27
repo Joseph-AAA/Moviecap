@@ -1,5 +1,6 @@
 import DefaultEditPanel from "@/components/editor/DefaultEditPanel";
 import RenderEditCard from "@/components/editor/RenderEditCard";
+import TransitionsPanel from "@/components/editor/TransitionsPanel";
 import VideoPreview from "@/components/editor/VideoPreview";
 import { MovieCapColors as C } from "@/constants/theme";
 import {
@@ -12,14 +13,16 @@ import {
   applyDefaultEdit,
   buildTimeline,
   createEmptyEditConfig,
+  removeCustomTransition,
   resolveFreezes,
+  setCustomTransition,
   unapplyDefaultEdit,
 } from "@/services/timeline/editTimeline";
-import type { EditConfig } from "@/types/edit";
+import type { EditConfig, TransitionKind } from "@/types/edit";
 import type { ProjectExport, VideoProject } from "@/types/project";
 import { clipDisplayName, formatClipDuration } from "@/utils/exportFormat";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -59,6 +62,14 @@ export default function EditorScreen() {
   const [editConfig, setEditConfig] = useState<EditConfig | null>(null);
   const [videoDuration, setVideoDuration] = useState(0);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  // Playhead is kept in a ref: it changes 10x per second and only matters
+  // when "Add at playhead" is pressed, so it must not re-render the screen.
+  const playheadRef = useRef(0);
+  const handlePlayheadChange = useCallback((time: number) => {
+    playheadRef.current = time;
+  }, []);
+  const [seekRequest, setSeekRequest] = useState<{ time: number; key: number } | null>(null);
 
   // Stop vertical scrolling while a trim handle or the playhead is dragged.
   const handleDraggingChange = useCallback((isDragging: boolean) => {
@@ -146,6 +157,16 @@ export default function EditorScreen() {
   const handleUnapplyDefault = () =>
     void updateEdit((base) => unapplyDefaultEdit(base));
 
+  const handleSaveTransition = (at: number, kind: TransitionKind, duration: number) =>
+    void updateEdit((base) => setCustomTransition(base, at, kind, duration));
+
+  const handleRemoveTransition = (at: number) =>
+    void updateEdit((base) => removeCustomTransition(base, at));
+
+  // Start 1.5 s before the cut so the transition is visible.
+  const handlePreviewCut = (at: number) =>
+    setSeekRequest({ time: Math.max(0, at - 1.5), key: Date.now() });
+
   // What the live preview should show (approximate; export is exact).
   const effectsPreview = useMemo(() => {
     if (clip || !editConfig) return null;
@@ -200,6 +221,8 @@ export default function EditorScreen() {
             projectId={project.id}
             onDraggingChange={handleDraggingChange}
             onDurationLoaded={setVideoDuration}
+            onPlayheadChange={handlePlayheadChange}
+            seekRequest={seekRequest}
             effectsPreview={effectsPreview}
           />
 
@@ -210,6 +233,20 @@ export default function EditorScreen() {
               isBusy={isSavingEdit}
               onApply={handleApplyDefault}
               onUnapply={handleUnapplyDefault}
+            />
+          )}
+
+          {!clip && videoDuration > 0 && (
+            <TransitionsPanel
+              config={
+                editConfig ??
+                createEmptyEditConfig(project.originalUri, videoDuration)
+              }
+              isBusy={isSavingEdit}
+              getPlayheadTime={() => playheadRef.current}
+              onPreviewCut={handlePreviewCut}
+              onSave={handleSaveTransition}
+              onRemoveCustom={handleRemoveTransition}
             />
           )}
 

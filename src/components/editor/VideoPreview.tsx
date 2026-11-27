@@ -32,6 +32,10 @@ interface VideoPreviewProps {
   onDraggingChange?: (isDragging: boolean) => void;
   /** Reports the real video duration (seconds) once the source loads. */
   onDurationLoaded?: (duration: number) => void;
+  /** Reports the playhead position (seconds) as it changes. */
+  onPlayheadChange?: (time: number) => void;
+  /** Jump to `time` and play; a new `key` triggers a new seek. */
+  seekRequest?: { time: number; key: number } | null;
   /** Approximate live preview of timeline effects; null/undefined = none. */
   effectsPreview?: {
     freezes: FreezeEffect[];
@@ -49,6 +53,8 @@ export default function VideoPreview({
   onExported,
   onDraggingChange,
   onDurationLoaded,
+  onPlayheadChange,
+  seekRequest,
   effectsPreview,
 }: VideoPreviewProps) {
   const [isExporting, setIsExporting] = useState(false);
@@ -136,6 +142,19 @@ export default function VideoPreview({
   useEffect(() => {
     onDraggingChange?.(isDragging);
   }, [isDragging, onDraggingChange]);
+
+  useEffect(() => {
+    onPlayheadChange?.(currentTime);
+  }, [currentTime, onPlayheadChange]);
+
+  // Parent-requested seek (e.g. "Watch this cut"): jump there and play.
+  useEffect(() => {
+    if (!seekRequest) return;
+    setPlayheadTime(seekRequest.time);
+    player.play();
+    // Only a new request key should trigger a seek.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seekRequest?.key]);
 
   useEffect(() => {
     player.timeUpdateEventInterval = 0.1;

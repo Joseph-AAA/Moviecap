@@ -13,6 +13,10 @@ import {
   buildTimeline,
   createEmptyEditConfig,
   createRandom,
+  cutPlacementProblem,
+  listTransitionSlots,
+  removeCustomTransition,
+  setCustomTransition,
   generateDefaultEdit,
   generateSegments,
   mapSourceToOutput,
@@ -268,5 +272,56 @@ describe("parseEditConfig", () => {
     assert.equal(parseEditConfig("not json"), null);
     assert.equal(parseEditConfig("null"), null);
     assert.equal(parseEditConfig(JSON.stringify({ version: 99 })), null);
+  });
+});
+
+describe("custom transitions (Phase 8)", () => {
+  it("custom replaces default at a cut; removing it brings the default back", () => {
+    const applied = applyDefaultEdit(config(120), { seed: 11, now: NOW });
+    const cut = applied.defaultEdit!.transitions[0].at;
+
+    const custom = setCustomTransition(applied, cut, "slideleft", 0.8, NOW);
+    const slot = listTransitionSlots(custom).find((s) => s.at === cut)!;
+    assert.equal(slot.source, "custom");
+    assert.equal(slot.effective?.kind, "slideleft");
+    assert.equal(slot.effective?.duration, 0.8);
+    // Default transition is untouched.
+    assert.deepEqual(custom.defaultEdit, applied.defaultEdit);
+
+    const reset = removeCustomTransition(custom, cut, NOW);
+    const back = listTransitionSlots(reset).find((s) => s.at === cut)!;
+    assert.equal(back.source, "default");
+    assert.equal(back.effective?.kind, "dissolve");
+  });
+
+  it("setting twice at the same cut replaces instead of stacking", () => {
+    const once = setCustomTransition(config(60), 20, "fade", 0.4, NOW);
+    const twice = setCustomTransition(once, 20.01, "fadeblack", 0.6, NOW);
+    assert.equal(twice.custom.transitions.length, 1);
+    assert.equal(twice.custom.transitions[0].kind, "fadeblack");
+  });
+
+  it("adds a new cut at the playhead without Default Edit, and survives Unapply", () => {
+    const withCut = setCustomTransition(config(60), 20, "dissolve", 0.4, NOW);
+    assert.deepEqual(buildTimeline(withCut).items.map((i) => i.type), ["clip", "clip"]);
+
+    const applied = applyDefaultEdit(withCut, { seed: 3, now: NOW });
+    const unapplied = unapplyDefaultEdit(applied, NOW);
+    assert.deepEqual(unapplied.custom.transitions, withCut.custom.transitions);
+  });
+
+  it("refuses cuts inside a freeze or at the very ends", () => {
+    const base = config(60);
+    const edited: EditConfig = {
+      ...base,
+      custom: {
+        ...base.custom,
+        freezes: [{ id: "f", origin: "custom", sourceTime: 10, duration: 5, zoomFrom: 1, zoomTo: 1.1, zoomDirection: "center" }],
+      },
+    };
+    assert.ok(cutPlacementProblem(edited, 12));
+    assert.ok(cutPlacementProblem(edited, 0.2));
+    assert.ok(cutPlacementProblem(edited, 59.9));
+    assert.equal(cutPlacementProblem(edited, 30), null);
   });
 });

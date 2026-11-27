@@ -461,6 +461,110 @@ export function mapSourceToOutput(_config: EditConfig, sourceTime: number): numb
 }
 
 // ---------------------------------------------------------------------------
+// Custom transitions (Phase 8)
+// ---------------------------------------------------------------------------
+
+export const CUSTOM_TRANSITION_DURATIONS = [0.2, 0.4, 0.6, 0.8, 1] as const;
+/** New cuts must be at least this far from the video's start and end. */
+export const MIN_CUT_EDGE_DISTANCE = 0.5;
+
+export type TransitionSlotSource = "default" | "custom" | "freeze-exit" | "none";
+
+/** One editable cut in the timeline, for the Transitions list. */
+export interface TransitionSlot {
+  at: number;
+  /** What plays here now (null = hard cut). */
+  effective: TransitionEffect | null;
+  source: TransitionSlotSource;
+  /** The default transition here, if any (shown again after a reset). */
+  defaultTransition: TransitionEffect | null;
+}
+
+/** Every cut in the resolved timeline, in order, with what plays there. */
+export function listTransitionSlots(config: EditConfig): TransitionSlot[] {
+  const timeline = buildTimeline(config);
+
+  return timeline.cuts.map((cut) => {
+    const custom = config.custom.transitions.find((t) => sameTime(t.at, cut.sourceTime)) ?? null;
+    const def =
+      config.defaultEdit?.transitions.find((t) => sameTime(t.at, cut.sourceTime)) ?? null;
+
+    let source: TransitionSlotSource = "none";
+    if (custom && cut.transition) source = "custom";
+    else if (def && cut.transition) source = "default";
+    else if (cut.transition) source = "freeze-exit";
+
+    return {
+      at: cut.sourceTime,
+      effective: cut.transition,
+      source,
+      defaultTransition: def,
+    };
+  });
+}
+
+/**
+ * Why a new cut can't go at `at`, or null if it can. Cuts inside a freeze
+ * or too close to the video's ends are refused.
+ */
+export function cutPlacementProblem(config: EditConfig, at: number): string | null {
+  if (at < MIN_CUT_EDGE_DISTANCE || at > config.sourceDuration - MIN_CUT_EDGE_DISTANCE) {
+    return "Move the playhead away from the very start or end of the video.";
+  }
+  if (insideFreeze(at, resolveFreezes(config))) {
+    return "This point is inside a freeze frame. Move the playhead outside the freeze.";
+  }
+  return null;
+}
+
+/**
+ * Add or replace the CUSTOM transition at `at`. Default transitions are
+ * never modified, so Unapply Default and "Reset to default" stay exact.
+ */
+export function setCustomTransition(
+  config: EditConfig,
+  at: number,
+  kind: TransitionEffect["kind"],
+  duration: number,
+  now: Date = new Date(),
+): EditConfig {
+  const time = roundTime(at);
+  const others = config.custom.transitions.filter((t) => !sameTime(t.at, time));
+  const transition: TransitionEffect = {
+    id: `trn-custom-${now.getTime().toString(36)}`,
+    origin: "custom",
+    at: time,
+    kind,
+    duration: roundTime(duration),
+  };
+
+  return {
+    ...config,
+    custom: {
+      ...config.custom,
+      transitions: [...others, transition].sort((a, b) => a.at - b.at),
+    },
+    updatedAt: now.toISOString(),
+  };
+}
+
+/** Remove the custom transition at `at`; a default one there comes back. */
+export function removeCustomTransition(
+  config: EditConfig,
+  at: number,
+  now: Date = new Date(),
+): EditConfig {
+  return {
+    ...config,
+    custom: {
+      ...config.custom,
+      transitions: config.custom.transitions.filter((t) => !sameTime(t.at, at)),
+    },
+    updatedAt: now.toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Persistence helpers
 // ---------------------------------------------------------------------------
 
