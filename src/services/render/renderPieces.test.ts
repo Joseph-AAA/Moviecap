@@ -128,11 +128,13 @@ describe("buildPieceArgs", () => {
 });
 
 describe("joining", () => {
-  it("joins pieces without re-encoding video and adds the range's original audio", () => {
+  it("re-encodes the join once (one clean H.264 header: no green frames) and adds the range's audio", () => {
     const args = buildFinalArgs({
       listPath: "/tmp/list.txt", inputPath: "/in.mp4", outputPath: "/out.mp4", rangeStart: 8.3, duration: 23.4, hasAudio: true,
+      source: SOURCE, encoder: "h264_mediacodec",
     });
-    assert.deepEqual(args.slice(args.indexOf("-c:v"), args.indexOf("-c:v") + 2), ["-c:v", "copy"]);
+    assert.deepEqual(args.slice(args.indexOf("-c:v"), args.indexOf("-c:v") + 2), ["-c:v", "h264_mediacodec"]);
+    assert.ok(!args.includes("copy"));
     assert.equal(args[args.indexOf("-ss") + 1], "8.3");
     assert.ok(args.includes("1:a:0"));
   });
@@ -140,6 +142,7 @@ describe("joining", () => {
   it("makes a video-only file for sources without audio", () => {
     const args = buildFinalArgs({
       listPath: "/l.txt", inputPath: "/in.mp4", outputPath: "/o.mp4", rangeStart: 0, duration: 10, hasAudio: false,
+      source: SOURCE, encoder: "mpeg4",
     });
     assert.ok(!args.includes("1:a:0"));
   });

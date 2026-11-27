@@ -7,7 +7,13 @@
  * original audio is added once:
  *
  *   piece i  = clip | freeze (zoomed still)      [+ transition at its start]
- *   final    = concat(pieces, stream copy) + original audio for the range
+ *   final    = concat(pieces) re-encoded ONCE + original audio for the range
+ *
+ * The final step re-encodes instead of copying: a phone's hardware encoder
+ * writes slightly different H.264 headers (SPS) into each piece, and a
+ * stream-copied join keeps only the first one, so Android's hardware decoder
+ * showed GREEN frames in later pieces. One encode gives one clean header.
+ * Pieces are encoded at a higher bitrate to offset the second encode.
  *
  * Sync: piece boundaries are computed in WHOLE FRAMES from the timeline, and
  * every piece is cut to its exact frame count, so the joined video has
@@ -204,14 +210,7 @@ export function buildPieceArgs(input: PieceArgsInput): string[] {
     filters.push(`[h][o]xfade=transition=${kind}:duration=${num(frames / fps, 4)}:offset=0[v]`);
   }
 
-  const bitrate = Math.min(
-    MAX_BITRATE,
-    source.videoBitrate > 0 ? Math.round(source.videoBitrate) : FALLBACK_BITRATE,
-  );
-  const videoCodec =
-    encoder === "h264_mediacodec"
-      ? ["-c:v", "h264_mediacodec", "-b:v", String(bitrate), "-g", String(Math.round(fps))]
-      : ["-c:v", "mpeg4", "-q:v", "3", "-g", String(Math.round(fps))];
+  const videoCodec = videoCodecArgs(encoder, source, "piece");
 
   return [
     "-y",
@@ -228,6 +227,23 @@ export function buildPieceArgs(input: PieceArgsInput): string[] {
   ];
 }
 
+/**
+ * Encoder arguments. Pieces are temporary, so they get twice the bitrate
+ * (and a finer mpeg4 quantiser) to keep quality after the final encode.
+ */
+export function videoCodecArgs(
+  encoder: VideoEncoder,
+  source: SourceInfo,
+  stage: "piece" | "final",
+): string[] {
+  const fps = outputFps(source);
+  const base = source.videoBitrate > 0 ? Math.round(source.videoBitrate) : FALLBACK_BITRATE;
+  const bitrate = Math.min(MAX_BITRATE, stage === "piece" ? base * 2 : base);
+  return encoder === "h264_mediacodec"
+    ? ["-c:v", "h264_mediacodec", "-b:v", String(bitrate), "-g", String(Math.round(fps))]
+    : ["-c:v", "mpeg4", "-q:v", stage === "piece" ? "2" : "3", "-g", String(Math.round(fps))];
+}
+
 /** Contents of the concat-demuxer list file. */
 export function buildConcatList(piecePaths: string[]): string {
   return piecePaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n";
@@ -242,14 +258,16 @@ export interface FinalArgsInput {
   /** Exported length in seconds. */
   duration: number;
   hasAudio: boolean;
+  source: SourceInfo;
+  encoder: VideoEncoder;
 }
 
 /**
- * Join the pieces WITHOUT re-encoding the video and add the original audio
- * for the same range (re-encoded once to AAC so every phone can play it).
+ * Join the pieces (re-encoding the video ONCE, so the file has a single
+ * consistent H.264 header) and add the original audio for the same range.
  */
 export function buildFinalArgs(input: FinalArgsInput): string[] {
-  const { listPath, inputPath, outputPath, rangeStart, duration, hasAudio } = input;
+  const { listPath, inputPath, outputPath, rangeStart, duration, hasAudio, source, encoder } = input;
   const audio = hasAudio
     ? [
         "-ss", num(rangeStart), "-t", num(duration), "-i", inputPath,
@@ -262,7 +280,7 @@ export function buildFinalArgs(input: FinalArgsInput): string[] {
     "-y",
     "-f", "concat", "-safe", "0", "-i", listPath,
     ...audio,
-    "-c:v", "copy",
+    ...videoCodecArgs(encoder, source, "final"),
     "-t", num(duration),
     "-movflags", "+faststart",
     outputPath,

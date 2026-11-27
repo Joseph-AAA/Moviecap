@@ -76,8 +76,8 @@ async function cleanUpRenderLeftovers(projectId: string): Promise<void> {
   }
 }
 
-/** Share of the progress bar used by the pieces; the rest is the join. */
-const PIECES_SHARE = 0.95;
+/** Share of the progress bar used by the pieces; the rest is the final encode. */
+const PIECES_SHARE = 0.65;
 
 /**
  * Render the project's saved edit for `range` to a NEW mp4 in the project
@@ -182,13 +182,15 @@ export function renderProjectEdit(
         }
       };
 
+      let encoder: VideoEncoder = "h264_mediacodec";
       try {
-        await renderAll("h264_mediacodec");
+        await renderAll(encoder);
       } catch (error) {
         if (cancelled || isCancelError(error)) throw new RenderCancelledError();
         console.warn("Hardware encoder failed, rendering again with software:", error);
         onProgress(0);
-        await renderAll("mpeg4");
+        encoder = "mpeg4";
+        await renderAll(encoder);
       }
 
       // Join (no video re-encode) + original audio for the range.
@@ -201,7 +203,7 @@ export function renderProjectEdit(
       progressBase = PIECES_SHARE;
       progressSpan = 1 - PIECES_SHARE;
       runFrames = totalFrames;
-      await run(
+      const finalArgs = (finalEncoder: VideoEncoder) =>
         buildFinalArgs({
           listPath: toFsPath(listFile.uri),
           inputPath,
@@ -209,8 +211,16 @@ export function renderProjectEdit(
           rangeStart: range.start,
           duration: timeline.outputDuration,
           hasAudio: source.hasAudio,
-        }),
-      );
+          source,
+          encoder: finalEncoder,
+        });
+      try {
+        await run(finalArgs(encoder));
+      } catch (error) {
+        if (cancelled || isCancelError(error) || encoder === "mpeg4") throw error;
+        console.warn("Hardware encoder failed on the final step, using software:", error);
+        await run(finalArgs("mpeg4"));
+      }
 
       if (!output.exists || output.size === 0) {
         throw new Error("Rendering finished but no video was written.");
