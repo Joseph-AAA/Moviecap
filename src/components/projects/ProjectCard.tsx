@@ -106,7 +106,11 @@ export default function ProjectCard({
           </Text>
 
           <Text style={{ color: C.primaryLight, fontSize: 12 }}>
-            Saved locally
+            {project.exportCount
+              ? `✂ ${project.exportCount} trimmed ${
+                  project.exportCount === 1 ? "clip" : "clips"
+                }`
+              : "Saved locally"}
           </Text>
         </View>
 

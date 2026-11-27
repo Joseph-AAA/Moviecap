@@ -2,30 +2,37 @@ import { useEffect, useState } from "react";
 import { Modal, Pressable, Text, TextInput, View } from "react-native";
 
 import { MovieCapColors as C } from "@/constants/theme";
-import type { VideoProject } from "@/types/project";
 
 interface RenameProjectModalProps {
   visible: boolean;
-  project: VideoProject | null;
+  /** Name to pre-fill; null while nothing is selected. */
+  currentName: string | null;
   isSaving: boolean;
   onClose: () => void;
   onSave: (newName: string) => void;
+  /** Wording overrides so the same dialog can rename clips. */
+  title?: string;
+  description?: string;
+  placeholder?: string;
 }
 
 export default function RenameProjectModal({
   visible,
-  project,
+  currentName,
   isSaving,
   onClose,
   onSave,
+  title = "Rename Project",
+  description = "Enter a new name for your project.",
+  placeholder = "Project name",
 }: RenameProjectModalProps) {
   const [name, setName] = useState("");
 
   useEffect(() => {
-    if (visible && project) {
-      setName(project.name);
+    if (visible && currentName !== null) {
+      setName(currentName);
     }
-  }, [visible, project]);
+  }, [visible, currentName]);
 
   const handleSave = () => {
     const trimmedName = name.trim();
@@ -67,7 +74,7 @@ export default function RenameProjectModal({
               marginBottom: 8,
             }}
           >
-            Rename Project
+            {title}
           </Text>
 
           <Text
@@ -77,13 +84,13 @@ export default function RenameProjectModal({
               marginBottom: 18,
             }}
           >
-            Enter a new name for your project.
+            {description}
           </Text>
 
           <TextInput
             value={name}
             onChangeText={setName}
-            placeholder="Project name"
+            placeholder={placeholder}
             placeholderTextColor={C.secondaryText}
             editable={!isSaving}
             maxLength={80}

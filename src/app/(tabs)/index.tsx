@@ -1,3 +1,4 @@
+import ClipList from "@/components/clips/ClipList";
 import AIDubbingCard from "@/components/home/AIDubbingCard";
 import HomeHeader from "@/components/home/HomeHeader";
 import NewProjectCard from "@/components/home/NewProjectCard";
@@ -27,6 +28,14 @@ export default function HomeScreen() {
 
         {/* Recent Projects */}
         <RecentProjects />
+
+        {/* Recent trimmed clips (hidden until the first export) */}
+        <ClipList
+          title="RECENT CLIPS"
+          limit={5}
+          style={{ marginTop: 24 }}
+          titleStyle={styles.sectionTitle}
+        />
       </ScrollView>
     </SafeAreaView>
   );

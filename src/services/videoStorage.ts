@@ -41,3 +41,43 @@ export function deleteProjectDirectory(projectId: string): void {
     directory.delete();
   }
 }
+
+/**
+ * Moves an exported video into its project directory.
+ * The trim library writes to the app's files directory and never cleans up,
+ * so moving (not copying) avoids leaving a duplicate behind on every export.
+ */
+export async function saveTrimmedVideo(
+  sourceUri: string,
+  projectId: string,
+): Promise<File> {
+  const projectDirectory = createProjectDirectory(projectId);
+
+  const source = sourceUri.startsWith("file://")
+    ? new File(sourceUri)
+    : new File(`file://${sourceUri}`);
+
+  const destination = new File(projectDirectory, `trimmed-${Date.now()}.mp4`);
+
+  await source.move(destination);
+
+  return source;
+}
+
+/**
+ * Lists all trimmed video files saved inside a project directory.
+ */
+export function getTrimmedVideos(projectId: string): File[] {
+  const projectDirectory = new Directory(Paths.document, "projects", projectId);
+
+  if (!projectDirectory.exists) {
+    return [];
+  }
+
+  return projectDirectory
+    .list()
+    .filter(
+      (item): item is File =>
+        item instanceof File && /^trimmed-.*\.mp4$/i.test(item.name),
+    );
+}

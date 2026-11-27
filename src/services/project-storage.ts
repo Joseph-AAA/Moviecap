@@ -4,9 +4,14 @@ import {
   deleteProjectDirectory,
 } from "@/services/videoStorage";
 
-import { deleteProject as deleteProjectRecord, saveProject } from "@/services/database";
+import {
+  deleteProject as deleteProjectRecord,
+  deleteProjectExport as deleteProjectExportRecord,
+  saveProject,
+} from "@/services/database";
 import { createProjectThumbnail } from "@/services/thumbnailService";
-import type { VideoProject } from "@/types/project";
+import type { ProjectExport, VideoProject } from "@/types/project";
+import { File } from "expo-file-system";
 
 interface ImportedVideo {
   uri: string;
@@ -81,5 +86,25 @@ export async function removeVideoProject(id: string): Promise<void> {
   } catch (error) {
     console.warn("Failed to delete project files:", error);
     throw error;
+  }
+}
+
+/**
+ * Deletes an exported clip: the database record first, then the file.
+ * A missing file (e.g. already removed) is not treated as an error.
+ */
+export async function removeProjectExport(
+  projectExport: ProjectExport,
+): Promise<void> {
+  await deleteProjectExportRecord(projectExport.id, projectExport.projectId);
+
+  try {
+    const file = new File(projectExport.uri);
+
+    if (file.exists) {
+      file.delete();
+    }
+  } catch (error) {
+    console.warn("Failed to delete export file:", error);
   }
 }

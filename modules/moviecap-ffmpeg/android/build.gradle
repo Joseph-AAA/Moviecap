@@ -1,0 +1,26 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.moviecapffmpeg'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.moviecapffmpeg"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+}
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  // Same FFmpegKit artifact and version that react-native-video-trim already
+  // ships (VideoTrim_ffmpeg_package=min, VideoTrim_ffmpeg_version=6.0.6), so
+  // Gradle resolves ONE copy: no extra download, no duplicate native libs.
+  implementation 'io.github.maitrungduc1410:ffmpeg-kit-min:6.0.6'
+}

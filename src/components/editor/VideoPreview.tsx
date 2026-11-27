@@ -1,28 +1,57 @@
+import { addProjectExport } from "@/services/database";
+import { saveTrimmedVideo } from "@/services/videoStorage";
+import { trim } from "react-native-video-trim";
+
 import { useEvent, useEventListener } from "expo";
 import { File } from "expo-file-system";
 import { Image } from "expo-image";
 import { useVideoPlayer, VideoView, type VideoThumbnail } from "expo-video";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    PanResponder,
-    Pressable,
-    StyleSheet,
-    Text,
-    View,
+  ActivityIndicator,
+  Alert,
+  PanResponder,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
 
+import EffectsPreviewOverlay, {
+  type PreviewTransition,
+} from "@/components/editor/EffectsPreviewOverlay";
 import { MovieCapColors as C } from "@/constants/theme";
+import type { FreezeEffect } from "@/types/edit";
 
 interface VideoPreviewProps {
   uri: string;
+  projectId: string;
+  /** Called after a trimmed clip has been saved and recorded. */
+  onExported?: () => void;
+  /** Lets a parent ScrollView disable scrolling while a handle is dragged. */
+  onDraggingChange?: (isDragging: boolean) => void;
+  /** Reports the real video duration (seconds) once the source loads. */
+  onDurationLoaded?: (duration: number) => void;
+  /** Approximate live preview of timeline effects; null/undefined = none. */
+  effectsPreview?: {
+    freezes: FreezeEffect[];
+    transitions: PreviewTransition[];
+  } | null;
 }
 
 const MIN_TRIM_DURATION = 0.5;
 const HANDLE_TOUCH_WIDTH = 44;
 const PLAYHEAD_TOUCH_WIDTH = 40;
 
-export default function VideoPreview({ uri }: VideoPreviewProps) {
+export default function VideoPreview({
+  uri,
+  projectId,
+  onExported,
+  onDraggingChange,
+  onDurationLoaded,
+  effectsPreview,
+}: VideoPreviewProps) {
+  const [isExporting, setIsExporting] = useState(false);
   const videoUri = useMemo(() => new File(uri).contentUri, [uri]);
   const player = useVideoPlayer(videoUri);
 
@@ -50,6 +79,63 @@ export default function VideoPreview({ uri }: VideoPreviewProps) {
   const leftDragStartTimeRef = useRef(0);
   const rightDragStartTimeRef = useRef(0);
   const playheadDragStartTimeRef = useRef(0);
+
+  const handleExport = async () => {
+    if (isExporting) return;
+
+    const selectedDuration = trimEnd - trimStart;
+
+    if (selectedDuration < MIN_TRIM_DURATION) {
+      Alert.alert("Invalid selection", "Please select at least 0.5 seconds.");
+      return;
+    }
+
+    try {
+      setIsExporting(true);
+      player.pause();
+
+      const result = await trim(uri, {
+        startTime: Math.round(trimStart * 1000),
+        endTime: Math.round(trimEnd * 1000),
+        type: "video",
+        outputExt: "mp4",
+        saveToPhoto: false,
+        removeAfterSavedToPhoto: false,
+        removeAfterFailedToSavePhoto: false,
+        enablePreciseTrimming: true,
+        removeAudio: false,
+        speed: 1.0,
+      });
+
+      if (!result.success || !result.outputPath) {
+        throw new Error("The video trimming operation failed.");
+      }
+
+      const savedFile = await saveTrimmedVideo(result.outputPath, projectId);
+
+      // Records the export in project_exports and updates projects.exportedUri.
+      await addProjectExport(projectId, savedFile.uri, result.duration / 1000);
+      onExported?.();
+
+      Alert.alert(
+        "Export successful",
+        "Find it under Trimmed Clips on the Projects page.",
+      );
+    } catch (error) {
+      console.error("Video export failed:", error);
+
+      Alert.alert(
+        "Export failed",
+        error instanceof Error ? error.message : "Could not export your video.",
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  useEffect(() => {
+    onDraggingChange?.(isDragging);
+  }, [isDragging, onDraggingChange]);
 
   useEffect(() => {
     player.timeUpdateEventInterval = 0.1;
@@ -113,6 +199,7 @@ export default function VideoPreview({ uri }: VideoPreviewProps) {
     trimEndRef.current = videoDuration;
 
     setDuration(videoDuration);
+    onDurationLoaded?.(videoDuration);
     setTrimStart(0);
     setTrimEnd(videoDuration);
     currentTimeRef.current = 0;
@@ -339,6 +426,14 @@ export default function VideoPreview({ uri }: VideoPreviewProps) {
           nativeControls={false}
           allowsPictureInPicture={false}
         />
+
+        {effectsPreview && (
+          <EffectsPreviewOverlay
+            player={player}
+            freezes={effectsPreview.freezes}
+            transitions={effectsPreview.transitions}
+          />
+        )}
       </View>
 
       {/* Playback Controls */}
@@ -532,11 +627,51 @@ export default function VideoPreview({ uri }: VideoPreviewProps) {
           </View>
         </View>
       </View>
+
+      <Pressable
+        onPress={handleExport}
+        disabled={
+          isExporting || !duration || trimEnd - trimStart < MIN_TRIM_DURATION
+        }
+        style={[
+          styles.exportButton,
+          isExporting && styles.exportButtonDisabled,
+        ]}
+      >
+        {isExporting ? (
+          <>
+            <ActivityIndicator color="#fff" />
+            <Text style={styles.exportButtonText}>Exporting...</Text>
+          </>
+        ) : (
+          <Text style={styles.exportButtonText}>Export Trimmed Video</Text>
+        )}
+      </Pressable>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  exportButton: {
+    marginHorizontal: 16,
+    marginTop: 16,
+    marginBottom: 16,
+    minHeight: 48,
+    borderRadius: 10,
+    backgroundColor: C.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  exportButtonDisabled: {
+    opacity: 0.6,
+  },
+  exportButtonText: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "600",
+  },
   container: {
     width: "100%",
     backgroundColor: "#000000",

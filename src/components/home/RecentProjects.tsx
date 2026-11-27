@@ -68,8 +68,14 @@ export default function RecentProjects() {
       ) : (
         <View style={{ gap: 12 }}>
           {projects.map((project) => (
-            <View
+            <Pressable
               key={project.id}
+              onPress={() =>
+                router.push({
+                  pathname: "/editor/[id]",
+                  params: { id: project.id },
+                })
+              }
               style={{
                 flexDirection: "row",
                 alignItems: "center",
@@ -123,8 +129,15 @@ export default function RecentProjects() {
                   {formatDuration(project.duration)} ·{" "}
                   {(project.fileSize / (1024 * 1024)).toFixed(2)} MB
                 </Text>
+
+                {!!project.exportCount && (
+                  <Text style={{ color: C.primaryLight, fontSize: 12 }}>
+                    ✂ {project.exportCount} trimmed{" "}
+                    {project.exportCount === 1 ? "clip" : "clips"}
+                  </Text>
+                )}
               </View>
-            </View>
+            </Pressable>
           ))}
         </View>
       )}

@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import ClipList from "@/components/clips/ClipList";
 import ProjectCard from "@/components/projects/ProjectCard";
 import RenameProjectModal from "@/components/projects/RenameProjectModal";
 import { MovieCapColors as C } from "@/constants/theme";
@@ -240,6 +241,16 @@ export default function ProjectsScreen() {
           </View>
         )}
 
+        {/* All trimmed clips (hidden until the first export) */}
+        <ClipList
+          title="TRIMMED CLIPS"
+          allowManage
+          onChanged={() => void loadProjects()}
+          refreshKey={projects}
+          style={{ marginTop: 28 }}
+          titleStyle={styles.sectionTitle}
+        />
+
         {/* Storage Information */}
         <View style={styles.storageCard}>
           <Text style={styles.storageTitle}>LOCAL STORAGE</Text>
@@ -258,7 +269,7 @@ export default function ProjectsScreen() {
       {/* Rename Project Modal */}
       <RenameProjectModal
         visible={isRenameVisible}
-        project={selectedProject}
+        currentName={selectedProject?.name ?? null}
         isSaving={isSaving}
         onClose={handleCloseRename}
         onSave={handleRename}
